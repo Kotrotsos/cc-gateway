@@ -14,9 +14,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -28,6 +31,13 @@ var (
 )
 
 var reqCounter uint64
+
+// screenFull, when true, prints the full request and response bodies to the
+// screen in addition to the usual summary. Toggled live with the "s" key.
+var screenFull atomic.Bool
+
+// rec is the live file recorder, toggled on/off with the "f" key.
+var rec recorder
 
 // hop-by-hop headers are connection-specific and must not be forwarded.
 var hopHeaders = []string{
@@ -66,7 +76,11 @@ func main() {
 		// No WriteTimeout: we stream long-lived SSE responses.
 	}
 
-	printBanner(*port, up.String())
+	// The -body flag sets the initial state of the live screen toggle.
+	screenFull.Store(*showBody)
+
+	keys := startKeyboard()
+	printBanner(*port, up.String(), keys)
 
 	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
@@ -89,6 +103,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body.Close()
 
 	logRequest(id, r, body)
+	recordRequest(id, r, body)
 
 	// Build the upstream request: same method, path, query, headers, body.
 	target := *h.upstream
@@ -126,6 +141,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	stats := &sseStats{events: map[string]int{}}
 	var rawBody bytes.Buffer
 
+	// Decide once, up front, whether to keep a copy of the response body for the
+	// screen dump or the file recorder. A toggle flipped mid-stream takes effect
+	// on the next request, not retroactively on this one.
+	capture := screenFull.Load() || rec.on()
+
 	// Stream the response straight through, flushing each chunk so Claude Code
 	// sees tokens arrive in real time. We tap the bytes read-only for the summary.
 	buf := make([]byte, 32*1024)
@@ -140,7 +160,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if isSSE {
 				stats.feed(chunk)
 			}
-			if *showBody {
+			if capture {
 				rawBody.Write(chunk)
 			}
 		}
@@ -150,8 +170,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logResponse(id, resp, isSSE, stats, time.Since(start))
-	if *showBody {
-		dumpBody(id, &rawBody)
+	if capture {
+		recordResponse(id, r, resp, rawBody.Bytes(), time.Since(start))
 	}
 }
 
@@ -311,10 +331,40 @@ func logError(id uint64, where string, err error) {
 	block(cRed, fmt.Sprintf("✗ #%d  ERROR", id), time.Now(), []string{where + ": " + err.Error()})
 }
 
-func dumpBody(id uint64, b *bytes.Buffer) {
+// recordRequest dumps a full request (headers omitted, body in full) to the
+// screen and/or the recording file, depending on the current toggle state.
+func recordRequest(id uint64, r *http.Request, body []byte) {
+	if !screenFull.Load() && !rec.on() {
+		return
+	}
+	header := fmt.Sprintf("#%d  REQUEST  %s %s", id, r.Method, r.URL.RequestURI())
+	if screenFull.Load() {
+		dumpToScreen(cCyan, header, body)
+	}
+	rec.write(header, body)
+}
+
+// recordResponse dumps a full response body (the raw, byte-for-byte stream) to
+// the screen and/or the recording file.
+func recordResponse(id uint64, r *http.Request, resp *http.Response, body []byte, dur time.Duration) {
+	header := fmt.Sprintf("#%d  RESPONSE  %s %s   %s   %s",
+		id, r.Method, r.URL.RequestURI(), resp.Status, dur.Round(time.Millisecond))
+	if screenFull.Load() {
+		dumpToScreen(cGreen, header, body)
+	}
+	rec.write(header, body)
+}
+
+// dumpToScreen prints one full body, bordered and dimmed, atomically.
+func dumpToScreen(col, header string, body []byte) {
 	printMu.Lock()
 	defer printMu.Unlock()
-	fmt.Printf("%s── #%d body ──%s\n%s\n", color(cDim), id, color(cReset), b.String())
+	fmt.Printf("%s╞══ %s%s\n", color(col), header, color(cReset))
+	os.Stdout.Write(body)
+	if len(body) > 0 && body[len(body)-1] != '\n' {
+		fmt.Println()
+	}
+	fmt.Printf("%s╰──%s\n", color(cDim), color(cReset))
 }
 
 // block prints a titled, bordered group atomically so concurrent requests
@@ -350,7 +400,7 @@ func parseReqBody(body []byte) *reqBody {
 	return &rb
 }
 
-func printBanner(port, up string) {
+func printBanner(port, up string, keys bool) {
 	base := "http://localhost:" + port
 	b := color(cBold)
 	r := color(cReset)
@@ -372,9 +422,6 @@ func printBanner(port, up string) {
 
 %sNothing is modified, filtered, or stored. Your existing auth (OAuth token
 or ANTHROPIC_API_KEY) passes straight through. Ctrl-C to stop.%s
-
-%s──────────────────────────────────────────────────────────────────────%s
-
 `,
 		b, r, dim, base, up, r,
 		b, r,
@@ -382,8 +429,158 @@ or ANTHROPIC_API_KEY) passes straight through. Ctrl-C to stop.%s
 		b, r,
 		cy, base, r,
 		dim, r,
-		dim, r,
 	)
+
+	if keys {
+		fmt.Printf(`
+%shotkeys:%s  %ss%s show full bodies on screen (toggle)   %sf%s record everything to a file (toggle)
+`, b, r, cy, r, cy, r)
+	}
+
+	fmt.Printf("\n%s──────────────────────────────────────────────────────────────────────%s\n\n", dim, r)
+}
+
+// ---------------------------------------------------------------------------
+// file recorder  (toggled with "f")
+// ---------------------------------------------------------------------------
+
+// recorder writes a plain-text, ANSI-free transcript of full requests and
+// responses to a timestamped file. Pressing "f" opens a fresh file; pressing
+// "f" again closes it. It is safe for concurrent in-flight requests.
+type recorder struct {
+	mu   sync.Mutex
+	file *os.File
+	path string
+}
+
+func (rec *recorder) on() bool {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return rec.file != nil
+}
+
+// toggle starts a new recording file or stops the current one.
+func (rec *recorder) toggle() {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+
+	if rec.file != nil {
+		path := rec.path
+		rec.file.Close()
+		rec.file = nil
+		rec.path = ""
+		statusLine(cYellow, "recording OFF  →  "+path)
+		return
+	}
+
+	path := fmt.Sprintf("cc-gateway-%s.log", time.Now().Format("20060102-150405"))
+	f, err := os.Create(path)
+	if err != nil {
+		statusLine(cRed, "recording failed: "+err.Error())
+		return
+	}
+	rec.file = f
+	rec.path = path
+	statusLine(cGreen, "recording ON  →  "+path+"  (full request/response bodies)")
+}
+
+// write appends one full request or response record to the file, if recording.
+func (rec *recorder) write(header string, body []byte) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.file == nil {
+		return
+	}
+	const bar = "════════════════════════════════════════════════════════════════════"
+	fmt.Fprintf(rec.file, "%s\n%s  %s\n%s\n", bar, header, time.Now().Format("2006-01-02 15:04:05.000"),
+		"────────────────────────────────────────────────────────────────────")
+	rec.file.Write(body)
+	if len(body) > 0 && body[len(body)-1] != '\n' {
+		rec.file.WriteString("\n")
+	}
+	rec.file.WriteString("\n")
+}
+
+// ---------------------------------------------------------------------------
+// keyboard  (live toggles)
+// ---------------------------------------------------------------------------
+
+var origStty string
+
+// startKeyboard puts the terminal into cbreak mode so single keypresses are
+// read without Enter, and launches the key loop. It returns false (and changes
+// nothing) when stdin is not an interactive terminal. Ctrl-C still works: we
+// leave signal generation enabled and restore the terminal in a signal handler.
+func startKeyboard() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	st, err := stty("-g")
+	if err != nil {
+		return false
+	}
+	origStty = strings.TrimSpace(st)
+	if _, err := stty("-icanon", "-echo", "min", "1", "time", "0"); err != nil {
+		return false
+	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		restoreStty()
+		os.Exit(0)
+	}()
+
+	go keyLoop()
+	return true
+}
+
+func keyLoop() {
+	buf := make([]byte, 1)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			return
+		}
+		if n == 0 {
+			continue
+		}
+		switch buf[0] {
+		case 's', 'S':
+			now := !screenFull.Load()
+			screenFull.Store(now)
+			if now {
+				statusLine(cGreen, "screen: showing FULL request/response bodies  (press s to stop)")
+			} else {
+				statusLine(cYellow, "screen: full bodies OFF")
+			}
+		case 'f', 'F':
+			rec.toggle()
+		}
+	}
+}
+
+// stty runs the stty utility against the controlling terminal (stdin).
+func stty(args ...string) (string, error) {
+	cmd := exec.Command("stty", args...)
+	cmd.Stdin = os.Stdin
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+func restoreStty() {
+	if origStty != "" {
+		stty(origStty)
+	}
+}
+
+// statusLine prints a single highlighted toggle-state line atomically.
+func statusLine(col, msg string) {
+	printMu.Lock()
+	defer printMu.Unlock()
+	fmt.Printf("%s● %s%s\n", color(col), msg, color(cReset))
 }
 
 // ---------------------------------------------------------------------------

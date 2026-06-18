@@ -61,13 +61,33 @@ response block:
   each), so you can read the anatomy of a streamed completion at a glance.
 - **tokens / cache** are pulled read-only from the stream's own usage events.
 
+## Live hotkeys
+
+While the gateway is running in an interactive terminal, two single-key toggles
+let you go from summaries to the full firehose on demand (no restart needed):
+
+| key | toggle                                                             |
+|-----|--------------------------------------------------------------------|
+| `s` | show the full request and response **bodies on screen**            |
+| `f` | record the full request and response bodies **to a file**          |
+
+Press once to turn on, press again to turn off. Each `f` session opens a fresh
+`cc-gateway-<timestamp>.log` (plain text, no ANSI codes) and closes it when you
+toggle off. It is a lot of output, which is the point: flip it on around the
+exchange you care about, then flip it back off.
+
+Toggles take effect from the next request; a body already mid-stream is not
+captured retroactively. Hotkeys are disabled automatically when stdin is not a
+terminal (e.g. when output is piped). `-body` simply sets the initial state of
+the `s` toggle.
+
 ## Flags
 
 | flag         | default                     | meaning                              |
 |--------------|-----------------------------|--------------------------------------|
 | `-port`      | `8443`                      | local port to listen on              |
 | `-upstream`  | `https://api.anthropic.com` | upstream base URL                    |
-| `-body`      | `false`                     | also dump full request/response bodies |
+| `-body`      | `false`                     | start with full body dump on (the `s` toggle) |
 | `-no-color`  | `false`                     | disable ANSI colors                  |
 
 `HTTPS_PROXY` / `HTTP_PROXY` are honored for the outbound connection.
