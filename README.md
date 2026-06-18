@@ -64,19 +64,44 @@ response block:
 ## Live hotkeys
 
 While the gateway is running in an interactive terminal, two single-key toggles
-let you go from summaries to the full firehose on demand (no restart needed):
+let you go from summaries to the full content on demand (no restart needed):
 
-| key | toggle                                                             |
-|-----|--------------------------------------------------------------------|
-| `s` | show the full request and response **bodies on screen**            |
-| `f` | record the full request and response bodies **to a file**          |
+| key | toggle                                                                  |
+|-----|-------------------------------------------------------------------------|
+| `s` | show the conversation **formatted on screen** (messages, not JSON)      |
+| `f` | record the **raw JSON** request and response bodies **to a file**       |
 
-Press once to turn on, press again to turn off. Each `f` session opens a fresh
-`cc-gateway-<timestamp>.log` (plain text, no ANSI codes) and closes it when you
-toggle off. It is a lot of output, which is the point: flip it on around the
-exchange you care about, then flip it back off.
+Press once to turn on, press again to turn off.
 
-Toggles take effect from the next request; a body already mid-stream is not
+The `s` view is built for reading, not grepping: the system prompt, each message
+(with its real line breaks), tool calls rendered as `key: value`, tool results,
+extended-thinking blocks, and a token / `stop_reason` line. Streamed responses
+are reassembled from their SSE deltas back into the message the model actually
+sent. Images are shown as `[image]` rather than dumping base64. Anything that
+isn't a Messages payload (errors, other endpoints) falls back to pretty JSON.
+
+```
+╞══ #12  REQUEST  POST /v1/messages
+  system
+    You are Claude Code.
+  user
+    fix the failing test
+  assistant
+    Let me look at it.
+    tool_use: Read (toolu_01abc)
+      file_path: /repo/main_test.go
+  user
+    tool_result (toolu_01abc ok)
+      --- FAIL: TestParse ...
+╰──
+```
+
+The `f` recording is the opposite: a verbatim, ANSI-free transcript of the
+exact bytes on the wire, so it round-trips and can be replayed or diffed. Each
+`f` session opens a fresh `cc-gateway-<timestamp>.log` and closes it on toggle
+off.
+
+Toggles take effect from the next request; a response already mid-stream is not
 captured retroactively. Hotkeys are disabled automatically when stdin is not a
 terminal (e.g. when output is piped). `-body` simply sets the initial state of
 the `s` toggle.
@@ -87,7 +112,7 @@ the `s` toggle.
 |--------------|-----------------------------|--------------------------------------|
 | `-port`      | `8443`                      | local port to listen on              |
 | `-upstream`  | `https://api.anthropic.com` | upstream base URL                    |
-| `-body`      | `false`                     | start with full body dump on (the `s` toggle) |
+| `-body`      | `false`                     | start with the formatted screen view on (the `s` toggle) |
 | `-no-color`  | `false`                     | disable ANSI colors                  |
 
 `HTTPS_PROXY` / `HTTP_PROXY` are honored for the outbound connection.

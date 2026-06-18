@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -171,7 +173,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	logResponse(id, resp, isSSE, stats, time.Since(start))
 	if capture {
-		recordResponse(id, r, resp, rawBody.Bytes(), time.Since(start))
+		recordResponse(id, r, resp, rawBody.Bytes(), isSSE, time.Since(start))
 	}
 }
 
@@ -331,40 +333,394 @@ func logError(id uint64, where string, err error) {
 	block(cRed, fmt.Sprintf("✗ #%d  ERROR", id), time.Now(), []string{where + ": " + err.Error()})
 }
 
-// recordRequest dumps a full request (headers omitted, body in full) to the
-// screen and/or the recording file, depending on the current toggle state.
+// recordRequest sends a request to the two sinks: the screen gets a formatted,
+// human-readable view of the conversation; the file gets the raw JSON verbatim.
 func recordRequest(id uint64, r *http.Request, body []byte) {
 	if !screenFull.Load() && !rec.on() {
 		return
 	}
 	header := fmt.Sprintf("#%d  REQUEST  %s %s", id, r.Method, r.URL.RequestURI())
 	if screenFull.Load() {
-		dumpToScreen(cCyan, header, body)
+		dumpLinesToScreen(cCyan, header, renderRequest(body))
 	}
-	rec.write(header, body)
+	rec.write(header, body) // raw JSON to file
 }
 
-// recordResponse dumps a full response body (the raw, byte-for-byte stream) to
-// the screen and/or the recording file.
-func recordResponse(id uint64, r *http.Request, resp *http.Response, body []byte, dur time.Duration) {
+// recordResponse renders the assistant's reply (assembled from the SSE stream or
+// the JSON body) to the screen, and writes the raw bytes to the file.
+func recordResponse(id uint64, r *http.Request, resp *http.Response, body []byte, isSSE bool, dur time.Duration) {
 	header := fmt.Sprintf("#%d  RESPONSE  %s %s   %s   %s",
 		id, r.Method, r.URL.RequestURI(), resp.Status, dur.Round(time.Millisecond))
 	if screenFull.Load() {
-		dumpToScreen(cGreen, header, body)
+		col := cGreen
+		if resp.StatusCode >= 400 {
+			col = cRed
+		}
+		dumpLinesToScreen(col, header, renderResponse(body, isSSE))
 	}
-	rec.write(header, body)
+	rec.write(header, body) // raw bytes to file
 }
 
-// dumpToScreen prints one full body, bordered and dimmed, atomically.
-func dumpToScreen(col, header string, body []byte) {
+// dumpLinesToScreen prints a bordered, indented block of already-formatted lines
+// atomically so concurrent requests never interleave.
+func dumpLinesToScreen(col, header string, lines []string) {
 	printMu.Lock()
 	defer printMu.Unlock()
 	fmt.Printf("%s╞══ %s%s\n", color(col), header, color(cReset))
-	os.Stdout.Write(body)
-	if len(body) > 0 && body[len(body)-1] != '\n' {
-		fmt.Println()
+	for _, ln := range lines {
+		fmt.Printf("  %s\n", ln)
 	}
 	fmt.Printf("%s╰──%s\n", color(cDim), color(cReset))
+}
+
+// ---------------------------------------------------------------------------
+// message formatting  (screen view — never raw JSON)
+// ---------------------------------------------------------------------------
+
+// contentBlock is a single Anthropic content block. Different block types use
+// different fields; only the ones present for a given Type are meaningful.
+type contentBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	ToolUseID string          `json:"tool_use_id"`
+	Content   json.RawMessage `json:"content"`
+	IsError   bool            `json:"is_error"`
+}
+
+type apiMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+type fullReq struct {
+	Model    string          `json:"model"`
+	System   json.RawMessage `json:"system"`
+	Messages []apiMessage    `json:"messages"`
+}
+
+// renderRequest turns a Messages API request body into formatted lines: the
+// system prompt followed by each message, with text, tool calls and tool
+// results laid out readably. Anything we can't parse falls back to pretty JSON.
+func renderRequest(body []byte) []string {
+	var fr fullReq
+	if len(body) == 0 || body[0] != '{' || json.Unmarshal(body, &fr) != nil || len(fr.Messages) == 0 {
+		return prettyOrRaw(body)
+	}
+	var out []string
+	if hasJSON(fr.System) {
+		out = append(out, c(cMagenta, "system"))
+		renderContent(fr.System, "  ", &out)
+	}
+	for _, m := range fr.Messages {
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, roleLabel(m.Role))
+		renderContent(m.Content, "  ", &out)
+	}
+	return out
+}
+
+type respMsg struct {
+	Model      string         `json:"model"`
+	Content    []contentBlock `json:"content"`
+	StopReason string         `json:"stop_reason"`
+	Usage      usage          `json:"usage"`
+}
+
+// renderResponse formats the assistant reply. For SSE it assembles the streamed
+// deltas back into content blocks; for a plain JSON message it reads them
+// directly. Non-message payloads (errors, other endpoints) fall back to JSON.
+func renderResponse(body []byte, isSSE bool) []string {
+	if isSSE {
+		return renderSSEResponse(body)
+	}
+	var rm respMsg
+	if len(body) > 0 && body[0] == '{' && json.Unmarshal(body, &rm) == nil && len(rm.Content) > 0 {
+		var out []string
+		out = append(out, roleLabel("assistant")+dimParen(rm.Model))
+		for _, b := range rm.Content {
+			renderBlock(b, "  ", &out)
+		}
+		out = append(out, c(cDim, tokenLine(rm.Usage.InputTokens, rm.Usage.OutputTokens,
+			rm.Usage.CacheReadInputTokens, rm.Usage.CacheCreationInputTokens, rm.StopReason)))
+		return out
+	}
+	return prettyOrRaw(body)
+}
+
+type asmBlock struct {
+	typ  string
+	name string
+	id   string
+	buf  strings.Builder
+}
+
+type sseContentEvent struct {
+	Type    string `json:"type"`
+	Index   int    `json:"index"`
+	Message struct {
+		Model string `json:"model"`
+		Usage usage  `json:"usage"`
+	} `json:"message"`
+	ContentBlock struct {
+		Type     string `json:"type"`
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
+	} `json:"content_block"`
+	Delta struct {
+		Type        string `json:"type"`
+		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
+		PartialJSON string `json:"partial_json"`
+		StopReason  string `json:"stop_reason"`
+	} `json:"delta"`
+	Usage *usage `json:"usage"`
+}
+
+func renderSSEResponse(body []byte) []string {
+	var (
+		model      string
+		order      []int
+		blocks     = map[int]*asmBlock{}
+		stopReason string
+		inTok      int
+		outTok     int
+		cacheR     int
+		cacheW     int
+	)
+	sc := bufio.NewScanner(bytes.NewReader(body))
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimRight(sc.Text(), "\r")
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev sseContentEvent
+		if json.Unmarshal([]byte(line[len("data: "):]), &ev) != nil {
+			continue
+		}
+		switch ev.Type {
+		case "message_start":
+			model = ev.Message.Model
+			inTok = ev.Message.Usage.InputTokens
+			cacheR = ev.Message.Usage.CacheReadInputTokens
+			cacheW = ev.Message.Usage.CacheCreationInputTokens
+		case "content_block_start":
+			b := &asmBlock{typ: ev.ContentBlock.Type, name: ev.ContentBlock.Name, id: ev.ContentBlock.ID}
+			b.buf.WriteString(ev.ContentBlock.Text)
+			b.buf.WriteString(ev.ContentBlock.Thinking)
+			blocks[ev.Index] = b
+			order = append(order, ev.Index)
+		case "content_block_delta":
+			b := blocks[ev.Index]
+			if b == nil {
+				break
+			}
+			switch ev.Delta.Type {
+			case "text_delta":
+				b.buf.WriteString(ev.Delta.Text)
+			case "thinking_delta":
+				b.buf.WriteString(ev.Delta.Thinking)
+			case "input_json_delta":
+				b.buf.WriteString(ev.Delta.PartialJSON)
+			}
+		case "message_delta":
+			if ev.Delta.StopReason != "" {
+				stopReason = ev.Delta.StopReason
+			}
+			if ev.Usage != nil {
+				outTok = ev.Usage.OutputTokens
+			}
+		}
+	}
+
+	var out []string
+	out = append(out, roleLabel("assistant")+dimParen(model))
+	for _, idx := range order {
+		b := blocks[idx]
+		cb := contentBlock{Type: b.typ, Name: b.name, ID: b.id}
+		switch b.typ {
+		case "text":
+			cb.Text = b.buf.String()
+		case "thinking":
+			cb.Thinking = b.buf.String()
+		case "tool_use":
+			cb.Input = json.RawMessage(b.buf.String())
+		}
+		renderBlock(cb, "  ", &out)
+	}
+	out = append(out, c(cDim, tokenLine(inTok, outTok, cacheR, cacheW, stopReason)))
+	return out
+}
+
+// renderContent formats a message's content, which may be a bare string or an
+// array of content blocks.
+func renderContent(raw json.RawMessage, indent string, out *[]string) {
+	raw = bytes.TrimSpace(raw)
+	if !hasJSON(raw) {
+		return
+	}
+	switch raw[0] {
+	case '"':
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			appendText(out, s, indent)
+			return
+		}
+	case '[':
+		var blocks []contentBlock
+		if json.Unmarshal(raw, &blocks) == nil {
+			for _, b := range blocks {
+				renderBlock(b, indent, out)
+			}
+			return
+		}
+	}
+	appendText(out, string(raw), indent)
+}
+
+func renderBlock(b contentBlock, indent string, out *[]string) {
+	switch b.Type {
+	case "text":
+		appendText(out, b.Text, indent)
+	case "thinking":
+		*out = append(*out, indent+c(cMagenta, "thinking"))
+		appendText(out, b.Thinking, indent+"  ")
+	case "tool_use":
+		*out = append(*out, indent+c(cYellow, "tool_use: "+b.Name)+dimParen(b.ID))
+		renderJSONFields(b.Input, indent+"  ", out)
+	case "tool_result":
+		status := "ok"
+		if b.IsError {
+			status = "error"
+		}
+		*out = append(*out, indent+c(cYellow, "tool_result")+dimParen(b.ToolUseID+" "+status))
+		renderContent(b.Content, indent+"  ", out)
+	case "image":
+		*out = append(*out, indent+c(cDim, "[image]"))
+	case "document":
+		*out = append(*out, indent+c(cDim, "[document]"))
+	default:
+		if b.Text != "" {
+			appendText(out, b.Text, indent)
+		} else {
+			*out = append(*out, indent+c(cDim, "["+b.Type+"]"))
+		}
+	}
+}
+
+// renderJSONFields prints a tool-use input object as readable "key: value"
+// lines (one per top-level field, keys sorted) rather than a JSON blob. String
+// values keep their newlines; nested structures are shown as compact JSON.
+func renderJSONFields(raw json.RawMessage, indent string, out *[]string) {
+	raw = bytes.TrimSpace(raw)
+	if !hasJSON(raw) || string(raw) == "{}" {
+		return
+	}
+	var m map[string]json.RawMessage
+	if raw[0] != '{' || json.Unmarshal(raw, &m) != nil {
+		appendText(out, string(raw), indent)
+		return
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := bytes.TrimSpace(m[k])
+		if len(v) > 0 && v[0] == '"' {
+			var s string
+			if json.Unmarshal(v, &s) == nil {
+				if strings.Contains(s, "\n") {
+					*out = append(*out, indent+c(cBold, k)+":")
+					appendText(out, s, indent+"  ")
+				} else {
+					*out = append(*out, indent+c(cBold, k)+": "+s)
+				}
+				continue
+			}
+		}
+		*out = append(*out, indent+c(cBold, k)+": "+compactJSON(v))
+	}
+}
+
+// appendText splits text on newlines and appends each line with the indent so
+// the screen view preserves the original line breaks.
+func appendText(out *[]string, text, indent string) {
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return
+	}
+	for _, ln := range strings.Split(text, "\n") {
+		*out = append(*out, indent+ln)
+	}
+}
+
+func roleLabel(role string) string {
+	col := cBold
+	switch role {
+	case "user":
+		col = cCyan
+	case "assistant":
+		col = cGreen
+	}
+	return c(col, role)
+}
+
+func dimParen(s string) string {
+	if s == "" {
+		return ""
+	}
+	return " " + c(cDim, "("+s+")")
+}
+
+func tokenLine(in, out, cacheR, cacheW int, stopReason string) string {
+	s := fmt.Sprintf("tokens: in %d / out %d", in, out)
+	if cacheR > 0 || cacheW > 0 {
+		s += fmt.Sprintf("   cache: read %d / write %d", cacheR, cacheW)
+	}
+	if stopReason != "" {
+		s += "   stop_reason: " + stopReason
+	}
+	return s
+}
+
+func compactJSON(v []byte) string {
+	var buf bytes.Buffer
+	if json.Compact(&buf, v) == nil {
+		return buf.String()
+	}
+	return string(v)
+}
+
+// prettyOrRaw indents JSON for readability, or returns the body split into
+// lines when it isn't JSON.
+func prettyOrRaw(body []byte) []string {
+	if len(body) > 0 && (body[0] == '{' || body[0] == '[') {
+		var buf bytes.Buffer
+		if json.Indent(&buf, body, "", "  ") == nil {
+			return strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+		}
+	}
+	s := strings.TrimRight(string(body), "\n")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
+}
+
+// hasJSON reports whether raw holds a non-empty, non-null JSON value.
+func hasJSON(raw json.RawMessage) bool {
+	s := bytes.TrimSpace(raw)
+	return len(s) > 0 && string(s) != "null"
 }
 
 // block prints a titled, bordered group atomically so concurrent requests
@@ -433,7 +789,7 @@ or ANTHROPIC_API_KEY) passes straight through. Ctrl-C to stop.%s
 
 	if keys {
 		fmt.Printf(`
-%shotkeys:%s  %ss%s show full bodies on screen (toggle)   %sf%s record everything to a file (toggle)
+%shotkeys:%s  %ss%s show formatted messages on screen (toggle)   %sf%s record raw JSON to a file (toggle)
 `, b, r, cy, r, cy, r)
 	}
 
@@ -481,7 +837,7 @@ func (rec *recorder) toggle() {
 	}
 	rec.file = f
 	rec.path = path
-	statusLine(cGreen, "recording ON  →  "+path+"  (full request/response bodies)")
+	statusLine(cGreen, "recording ON  →  "+path+"  (raw JSON request/response bodies)")
 }
 
 // write appends one full request or response record to the file, if recording.
@@ -552,9 +908,9 @@ func keyLoop() {
 			now := !screenFull.Load()
 			screenFull.Store(now)
 			if now {
-				statusLine(cGreen, "screen: showing FULL request/response bodies  (press s to stop)")
+				statusLine(cGreen, "screen: showing FORMATTED messages  (press s to stop)")
 			} else {
-				statusLine(cYellow, "screen: full bodies OFF")
+				statusLine(cYellow, "screen: formatted messages OFF")
 			}
 		case 'f', 'F':
 			rec.toggle()
@@ -632,10 +988,11 @@ const (
 	cReset  = "0"
 	cBold   = "1"
 	cDim    = "2"
-	cRed    = "31"
-	cGreen  = "32"
-	cYellow = "33"
-	cCyan   = "36"
+	cRed     = "31"
+	cGreen   = "32"
+	cYellow  = "33"
+	cMagenta = "35"
+	cCyan    = "36"
 )
 
 func color(code string) string {
