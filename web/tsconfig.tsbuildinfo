@@ -1,1 +1,0 @@
-{"root":["./src/app.tsx","./src/main.tsx","./src/components/analytics.tsx","./src/components/explorer.tsx","./src/components/requestbody.tsx","./src/components/sessionlist.tsx","./src/components/traceview.tsx","./src/components/ui/primitives.tsx","./src/lib/api.ts","./src/lib/live.ts","./src/lib/theme.tsx","./src/lib/utils.ts"],"errors":true,"version":"5.9.3"}

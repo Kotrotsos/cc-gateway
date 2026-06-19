@@ -8,3 +8,6 @@
 
 # Frontend deps (the built web/dist is committed so `go build` works standalone)
 web/node_modules
+
+# TS build info
+web/*.tsbuildinfo
