@@ -1,2 +1,10 @@
 /cc-gateway
 /cc-gateway-*.log
+
+# SQLite database (created at runtime)
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend deps (the built web/dist is committed so `go build` works standalone)
+web/node_modules

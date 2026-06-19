@@ -1,18 +1,42 @@
 # cc-gateway
 
-A transparent, zero-modification proxy that sits between Claude Code and the
-Anthropic API so you can **see the traffic flow**. It does not filter, strip,
-rewrite, or store anything. Every byte is forwarded untouched, so streaming,
-tool use, prompt caching, and your existing auth all keep working exactly as
-before. The gateway just prints an intuitive view of what goes past.
+A transparent proxy between Claude Code and the Anthropic API that makes the
+traffic **visible and browsable**. It forwards every byte untouched, so
+streaming, tool use, prompt caching, and your existing auth all keep working
+exactly as before, and on the side it records each exchange into an embedded
+database and serves a web UI: a trace explorer and live analytics. Think
+Langfuse / LangSmith, but for Claude Code, in a single binary.
+
+The proxy path is sacred: persistence runs entirely off the hot path
+(asynchronous, best-effort, panic-isolated). If the database is slow, locked, or
+disabled, forwarding is unaffected. `-no-store` turns persistence off entirely
+for the original pure-proxy behavior.
+
+## What you get
+
+- **Explorer** — every Claude Code session as one trace from start to finish.
+  Each API request is a node in a timeline; reconstructed tool-call spans sit
+  between nodes with their durations. Expand any request to read the
+  conversation: system prompt, messages, tool calls and results, extended
+  thinking — each block collapsible with a two-line preview. A raw-JSON drawer
+  shows the verbatim bytes.
+- **Analytics** — totals (sessions, requests, tokens, cache hit rate, estimated
+  cost, tool calls, latency), requests/tokens over time, a tool-type breakdown
+  you can drill into (click a tool → list its calls → jump to the originating
+  trace), model distribution and stop-reason breakdown.
+- **Live tail** — new exchanges stream into the UI over SSE as they happen.
 
 ## Build
 
-Single static binary, standard library only:
+The binary embeds the built web UI, so the only build dependency beyond Go is a
+JS toolchain (Node + pnpm) to compile the frontend once.
 
 ```sh
-go build -o cc-gateway .
+make build      # builds web/dist then the single ./cc-gateway binary
 ```
+
+Pure Go otherwise: the database is `modernc.org/sqlite` (no cgo), so the result
+is a single static, cross-compilable binary.
 
 ## Run
 
@@ -20,108 +44,79 @@ go build -o cc-gateway .
 ./cc-gateway
 ```
 
-It listens on `http://localhost:8443` and forwards to
-`https://api.anthropic.com`. On startup it prints exactly how to point Claude
-Code at it:
+- Proxy: `http://localhost:8443` → forwards to `https://api.anthropic.com`
+- Web UI: `http://localhost:8088`
+
+Point Claude Code at the proxy:
 
 ```sh
 export ANTHROPIC_BASE_URL=http://localhost:8443
 claude
 ```
 
-or for a single run:
+Your existing OAuth token (subscription) or `ANTHROPIC_API_KEY` passes straight
+through; the gateway needs no credentials. Open the web UI and watch the session
+appear live.
+
+## Development
 
 ```sh
-ANTHROPIC_BASE_URL=http://localhost:8443 claude
+make dev-api    # terminal 1: Go proxy + API on :8443 / :8088
+make dev-ui     # terminal 2: Vite dev server on :5173 (proxies /api → :8088)
 ```
 
-Your existing OAuth token (subscription) or `ANTHROPIC_API_KEY` passes straight
-through, so you don't need to configure credentials in the gateway.
+Use `http://localhost:5173` for hot-reloading frontend work; the embedded build
+at `:8088` is what ships.
 
-## What you see
+## Live hotkeys (terminal view)
 
-For every request the gateway prints a request block and, when it completes, a
-response block:
+The original terminal view is still there. Two single-key toggles work while the
+gateway runs in an interactive terminal:
 
-```
-┌─ → #1  REQUEST 16:41:59.943
-│  POST /v1/messages
-│  model claude-opus-4-8   stream true   max_tokens 1024
-│  1 messages   2 tools   system prompt   172 B body
-└─
-┌─ ← #1  RESPONSE 16:41:59.958
-│  200 OK   text/event-stream   16ms
-│  flow: message_start → content_block_start → content_block_delta ×5 → message_delta → message_stop
-│  tokens: in 4201 / out 532   cache: read 3800 / write 0
-│  stop_reason: end_turn
-└─
-```
-
-- **flow** is the live shape of the SSE stream (the event types and how many of
-  each), so you can read the anatomy of a streamed completion at a glance.
-- **tokens / cache** are pulled read-only from the stream's own usage events.
-
-## Live hotkeys
-
-While the gateway is running in an interactive terminal, two single-key toggles
-let you go from summaries to the full content on demand (no restart needed):
-
-| key | toggle                                                                  |
-|-----|-------------------------------------------------------------------------|
-| `s` | show the conversation **formatted on screen** (messages, not JSON)      |
-| `f` | record the **raw JSON** request and response bodies **to a file**       |
-
-Press once to turn on, press again to turn off.
-
-The `s` view is built for reading, not grepping: the system prompt, each message
-(with its real line breaks), tool calls rendered as `key: value`, tool results,
-extended-thinking blocks, and a token / `stop_reason` line. Streamed responses
-are reassembled from their SSE deltas back into the message the model actually
-sent. Images are shown as `[image]` rather than dumping base64. Anything that
-isn't a Messages payload (errors, other endpoints) falls back to pretty JSON.
-
-```
-╞══ #12  REQUEST  POST /v1/messages
-  system
-    You are Claude Code.
-  user
-    fix the failing test
-  assistant
-    Let me look at it.
-    tool_use: Read (toolu_01abc)
-      file_path: /repo/main_test.go
-  user
-    tool_result (toolu_01abc ok)
-      --- FAIL: TestParse ...
-╰──
-```
-
-The `f` recording is the opposite: a verbatim, ANSI-free transcript of the
-exact bytes on the wire, so it round-trips and can be replayed or diffed. Each
-`f` session opens a fresh `cc-gateway-<timestamp>.log` and closes it on toggle
-off.
-
-Toggles take effect from the next request; a response already mid-stream is not
-captured retroactively. Hotkeys are disabled automatically when stdin is not a
-terminal (e.g. when output is piped). `-body` simply sets the initial state of
-the `s` toggle.
+| key | toggle                                                             |
+|-----|--------------------------------------------------------------------|
+| `s` | show the conversation **formatted on screen** (messages, not JSON) |
+| `f` | record the **raw JSON** request/response bodies **to a file**      |
 
 ## Flags
 
-| flag         | default                     | meaning                              |
-|--------------|-----------------------------|--------------------------------------|
-| `-port`      | `8443`                      | local port to listen on              |
-| `-upstream`  | `https://api.anthropic.com` | upstream base URL                    |
-| `-body`      | `false`                     | start with the formatted screen view on (the `s` toggle) |
-| `-no-color`  | `false`                     | disable ANSI colors                  |
+| flag         | default                     | meaning                                   |
+|--------------|-----------------------------|-------------------------------------------|
+| `-port`      | `8443`                      | proxy listen port                         |
+| `-ui-port`   | `8088`                      | web UI / API listen port                  |
+| `-db`        | `cc-gateway.db`             | SQLite database path                      |
+| `-upstream`  | `https://api.anthropic.com` | upstream base URL                         |
+| `-no-ui`     | `false`                     | disable the web UI / API server           |
+| `-no-store`  | `false`                     | disable persistence (pure transparent proxy) |
+| `-body`      | `false`                     | start with the formatted screen view on   |
+| `-no-color`  | `false`                     | disable ANSI colors                       |
 
 `HTTPS_PROXY` / `HTTP_PROXY` are honored for the outbound connection.
 
 ## How it works
 
-Plain HTTP listener on localhost (no TLS certs needed since Claude Code connects
-over loopback). Each request is buffered just enough to summarize it, then
-replayed to the upstream with identical method, path, query, headers, and body.
-The response is streamed back chunk-by-chunk with an immediate flush per chunk,
-and the same bytes are tapped read-only to build the summary. Hop-by-hop headers
-are dropped per the HTTP spec; everything else is forwarded verbatim.
+A plain HTTP listener on localhost replays each request to the upstream with
+identical method, path, query, headers and body, and streams the response back
+chunk-by-chunk with an immediate flush so tokens arrive in real time. The same
+bytes are tapped read-only.
+
+When persistence is on, the finished exchange is handed to a bounded channel and
+a single writer goroutine parses it and stores it. Request/response bodies are
+content-addressed and gzip-compressed, so the large system prompt Claude Code
+resends on every request (prompt caching) is stored only once. Sessions are
+correlated from the `metadata.user_id` Claude Code sends; tool spans are
+reconstructed by matching each `tool_use` to the `tool_result` that answers it
+in the following request.
+
+### Layout
+
+```
+cmd/cc-gateway      wiring, flags, startup banner
+internal/proxy      transparent forwarding + SSE tap
+internal/parse      structured parse of requests/responses + SSE reassembly
+internal/term       terminal view + s/f hotkeys
+internal/store      SQLite schema, blob dedup, queries, analytics
+internal/ingest     async capture, session correlation, span building
+internal/api        REST API + live SSE stream + embedded UI
+web/                React + Tailwind + shadcn UI (embedded as web/dist)
+```
