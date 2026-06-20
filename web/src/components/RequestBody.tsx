@@ -5,7 +5,18 @@ import { api, type ContentBlock, type Message, type RequestDetail } from "@/lib/
 import { cn, fmtCost, fmtTokens } from "@/lib/utils";
 import { Badge, Button } from "./ui/primitives";
 
-export function RequestBody({ requestId, collapseNonce }: { requestId: number; collapseNonce?: number }) {
+export function RequestBody({
+  requestId,
+  collapseNonce,
+  baselineMessages,
+}: {
+  requestId: number;
+  collapseNonce?: number;
+  // Number of leading messages already shown by the previous request in this
+  // continuation run. When > 0, the system prompt and those messages are folded
+  // away so only the newly added turns show. 0/undefined = show everything.
+  baselineMessages?: number;
+}) {
   const [detail, setDetail] = useState<RequestDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -38,15 +49,30 @@ export function RequestBody({ requestId, collapseNonce }: { requestId: number; c
         <RawDialog requestId={requestId} />
       </div>
 
-      {/* Remounting on collapseNonce resets every TextBlock's local "more" state. */}
-      <div key={collapseNonce} className="space-y-2.5 px-3 py-3">
-        {detail.system.length > 0 && <Turn role="system" content={detail.system} />}
-        {detail.messages.map((m, i) => (
-          <Turn key={i} role={m.role} content={m.content} />
-        ))}
-        {detail.response.ok && <Turn role="assistant" content={detail.response.content} highlight />}
-        {detail.error && <div className="text-xs text-destructive">error: {detail.error}</div>}
-      </div>
+      {(() => {
+        const baseline = Math.min(baselineMessages ?? 0, detail.messages.length);
+        const folded = baseline > 0;
+        const prior = folded ? detail.messages.slice(0, baseline) : [];
+        const fresh = folded ? detail.messages.slice(baseline) : detail.messages;
+        return (
+          // Remounting on collapseNonce resets every TextBlock's local "more" state.
+          <div key={collapseNonce} className="space-y-2.5 px-3 py-3">
+            {folded ? (
+              <PriorContext system={detail.system} prior={prior} />
+            ) : (
+              detail.system.length > 0 && <Turn role="system" content={detail.system} />
+            )}
+            {fresh.map((m, i) => (
+              <Turn key={i} role={m.role} content={m.content} />
+            ))}
+            {folded && fresh.length === 0 && (
+              <div className="text-xs text-muted-foreground">No new messages — this request resent the same context.</div>
+            )}
+            {detail.response.ok && <Turn role="assistant" content={detail.response.content} highlight />}
+            {detail.error && <div className="text-xs text-destructive">error: {detail.error}</div>}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -68,6 +94,33 @@ function Turn({ role, content, highlight }: { role: string; content: ContentBloc
           <Block key={i} b={b} />
         ))}
       </div>
+    </div>
+  );
+}
+
+// PriorContext folds the conversation prefix that earlier requests already
+// showed (the system prompt plus messages carried over) into one collapsible
+// block, so a continuation foregrounds only its newly added turns.
+function PriorContext({ system, prior }: { system: ContentBlock[]; prior: Message[] }) {
+  const [open, setOpen] = useState(false);
+  const count = prior.length + (system.length > 0 ? 1 : 0);
+  return (
+    <div className="rounded-md border border-dashed">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] font-medium text-muted-foreground hover:text-foreground"
+      >
+        <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", !open && "-rotate-90")} />
+        {open ? "Hide" : "Show"} earlier context · {count} item{count === 1 ? "" : "s"} already shown above
+      </button>
+      {open && (
+        <div className="space-y-1.5 border-t px-2 py-2">
+          {system.length > 0 && <Turn role="system" content={system} />}
+          {prior.map((m, i) => (
+            <Turn key={i} role={m.role} content={m.content} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

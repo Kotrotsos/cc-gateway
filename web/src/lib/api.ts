@@ -40,6 +40,7 @@ export interface RequestSummary {
   est_cost: number;
   stop_reason: string;
   num_tools: number;
+  num_messages: number;
   error: string;
   assistant_preview: string;
   tool_uses: ToolUseRef[];

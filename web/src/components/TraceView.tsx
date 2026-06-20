@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Folder, GitBranch, Layers, Terminal } from "lucide-react";
+import { AlertTriangle, ChevronRight, Folder, GitBranch, Layers, Terminal } from "lucide-react";
 import { api, type RequestSummary, type SessionDetail, type Span } from "@/lib/api";
 import { cn, fmtCost, fmtDateTime, fmtDuration, fmtTime, fmtTokens, shortModel } from "@/lib/utils";
-import { groupThreads } from "@/lib/threads";
+import { continuationRuns, groupThreads } from "@/lib/threads";
 import { Badge } from "./ui/primitives";
 
 // TraceView is the middle panel: a selectable list of the session's requests
@@ -22,7 +22,7 @@ export function TraceView({
   sessionId: number;
   version: number;
   selectedRequest?: number;
-  onSelectRequest: (id: number) => void;
+  onSelectRequest: (id: number, baselineMessages: number) => void;
   focusRequest?: number;
   onFilterTool: (name: string) => void;
   groupByThread: boolean;
@@ -124,7 +124,7 @@ export function TraceView({
                     {t.requests.length} req · {shortModel(t.peak.model)}
                   </span>
                 </div>
-                <RequestRows
+                <RunList
                   requests={t.requests}
                   spansByCall={spansByCall}
                   selectedRequest={selectedRequest}
@@ -136,7 +136,7 @@ export function TraceView({
             ))}
           </div>
         ) : (
-          <RequestRows
+          <RunList
             requests={detail.requests}
             spansByCall={spansByCall}
             selectedRequest={selectedRequest}
@@ -150,8 +150,10 @@ export function TraceView({
   );
 }
 
-// RequestRows renders an ordered list of request nodes with the timeline rail.
-function RequestRows({
+// RunList groups requests into continuation runs (see continuationRuns) and
+// renders each as a group: the first request carries the full context; the rest
+// are continuations indented under a green branch line, collapsible.
+function RunList({
   requests,
   spansByCall,
   selectedRequest,
@@ -163,24 +165,194 @@ function RequestRows({
   spansByCall: Map<number, Span[]>;
   selectedRequest?: number;
   focusRequest?: number;
-  onSelectRequest: (id: number) => void;
+  onSelectRequest: (id: number, baselineMessages: number) => void;
   onFilterTool: (name: string) => void;
 }) {
+  const runs = useMemo(() => continuationRuns(requests), [requests]);
   return (
     <ol className="relative">
-      {requests.map((r, i) => (
-        <RequestNode
-          key={r.id}
-          req={r}
-          isLast={i === requests.length - 1}
-          spans={spansByCall.get(r.id) ?? []}
-          selected={r.id === selectedRequest}
-          focus={r.id === focusRequest}
-          onSelect={() => onSelectRequest(r.id)}
+      {runs.map((run, ri) => (
+        <RunGroup
+          key={run[0].id}
+          run={run}
+          isLastRun={ri === runs.length - 1}
+          spansByCall={spansByCall}
+          selectedRequest={selectedRequest}
+          focusRequest={focusRequest}
+          onSelectRequest={onSelectRequest}
           onFilterTool={onFilterTool}
         />
       ))}
     </ol>
+  );
+}
+
+function RunGroup({
+  run,
+  isLastRun,
+  spansByCall,
+  selectedRequest,
+  focusRequest,
+  onSelectRequest,
+  onFilterTool,
+}: {
+  run: RequestSummary[];
+  isLastRun: boolean;
+  spansByCall: Map<number, Span[]>;
+  selectedRequest?: number;
+  focusRequest?: number;
+  onSelectRequest: (id: number, baselineMessages: number) => void;
+  onFilterTool: (name: string) => void;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  const root = run[0];
+  const children = run.slice(1);
+  const hasChildren = children.length > 0;
+  const err = root.status >= 400 || !!root.error;
+
+  return (
+    <li className="relative pb-3 pl-7">
+      {/* main timeline rail connecting run roots */}
+      {!isLastRun && <span className="absolute left-[9px] top-5 h-full w-px bg-border" />}
+      <span
+        className={cn(
+          "absolute left-1 top-[7px] h-3.5 w-3.5 rounded-full border-2 bg-background",
+          err ? "border-destructive" : "border-primary",
+        )}
+      />
+
+      <RequestNode
+        req={root}
+        spans={spansByCall.get(root.id) ?? []}
+        selected={root.id === selectedRequest}
+        focus={root.id === focusRequest}
+        onSelect={() => onSelectRequest(root.id, 0)}
+        onFilterTool={onFilterTool}
+        collapsible={hasChildren}
+        collapsed={collapsed}
+        onToggleCollapse={() => setCollapsed((c) => !c)}
+        childCount={children.length}
+      />
+
+      {hasChildren && !collapsed && (
+        <div className="ml-2 mt-2 space-y-2 border-l-2 border-emerald-500/50 pl-4">
+          {children.map((child, i) => (
+            <RequestNode
+              key={child.id}
+              req={child}
+              indented
+              delta={child.num_messages - run[i].num_messages}
+              spans={spansByCall.get(child.id) ?? []}
+              selected={child.id === selectedRequest}
+              focus={child.id === focusRequest}
+              onSelect={() => onSelectRequest(child.id, run[i].num_messages)}
+              onFilterTool={onFilterTool}
+            />
+          ))}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function RequestNode({
+  req,
+  spans,
+  selected,
+  focus,
+  onSelect,
+  onFilterTool,
+  indented,
+  delta,
+  collapsible,
+  collapsed,
+  onToggleCollapse,
+  childCount,
+}: {
+  req: RequestSummary;
+  spans: Span[];
+  selected: boolean;
+  focus: boolean;
+  onSelect: () => void;
+  onFilterTool: (name: string) => void;
+  indented?: boolean;
+  delta?: number;
+  collapsible?: boolean;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+  childCount?: number;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (focus) ref.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focus]);
+
+  const err = req.status >= 400 || !!req.error;
+  const maxSpan = Math.max(1, ...spans.map((s) => s.duration_ms || 0));
+
+  return (
+    <div ref={ref} className="relative">
+      {/* green node marker for indented continuations, sitting on the branch line */}
+      {indented && <span className="absolute -left-[19px] top-[11px] h-2 w-2 rounded-full bg-emerald-500/70" />}
+
+      <div
+        onClick={onSelect}
+        role="button"
+        tabIndex={0}
+        className={cn(
+          "flex w-full cursor-pointer items-center gap-2 rounded-lg border bg-card px-3 py-2 text-left transition-colors",
+          selected ? "border-primary/40 bg-accent ring-1 ring-primary/30" : "hover:bg-muted/60",
+          focus && !selected && "ring-1 ring-ring",
+        )}
+      >
+        {collapsible && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleCollapse?.();
+            }}
+            className="-ml-1 shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted"
+            title={collapsed ? `Expand ${childCount} continuation${childCount === 1 ? "" : "s"}` : "Collapse continuations"}
+          >
+            <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", !collapsed && "rotate-90")} />
+          </button>
+        )}
+        <span className="shrink-0 text-xs font-semibold text-muted-foreground">#{req.seq}</span>
+        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{fmtTime(req.ts_start)}</span>
+        {err ? <Badge variant="error">{req.status || "error"}</Badge> : <Badge variant="success">{req.status}</Badge>}
+        {indented && typeof delta === "number" && (
+          <span
+            className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-px text-[10px] font-medium text-emerald-700 dark:text-emerald-400"
+            title="new messages added by this request"
+          >
+            +{delta} msg
+          </span>
+        )}
+        <span className="min-w-0 flex-1 truncate text-sm text-foreground/80">
+          {req.assistant_preview || <span className="text-muted-foreground">{req.stop_reason || "—"}</span>}
+        </span>
+        {collapsed && childCount ? (
+          <span className="shrink-0 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">+{childCount} more</span>
+        ) : null}
+        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          {fmtDuration(req.duration_ms)} · ↑{fmtTokens(req.in_tokens)} ↓{fmtTokens(req.out_tokens)}
+        </span>
+      </div>
+
+      <NodeSpans spans={spans} max={maxSpan} onFilterTool={onFilterTool} />
+    </div>
+  );
+}
+
+// NodeSpans renders the reconstructed tool spans that ran after a request.
+function NodeSpans({ spans, max, onFilterTool }: { spans: Span[]; max: number; onFilterTool: (n: string) => void }) {
+  if (spans.length === 0) return null;
+  return (
+    <div className="ml-3 mt-1.5 space-y-1">
+      {spans.map((sp) => (
+        <SpanBar key={sp.tool_use_id} sp={sp} max={max} onFilterTool={onFilterTool} />
+      ))}
+    </div>
   );
 }
 
@@ -190,76 +362,6 @@ function Stat({ label, value }: { label: string; value: string }) {
       <span className="font-semibold text-foreground">{value}</span>
       <span className="text-muted-foreground">{label}</span>
     </span>
-  );
-}
-
-function RequestNode({
-  req,
-  isLast,
-  spans,
-  selected,
-  focus,
-  onSelect,
-  onFilterTool,
-}: {
-  req: RequestSummary;
-  isLast: boolean;
-  spans: Span[];
-  selected: boolean;
-  focus: boolean;
-  onSelect: () => void;
-  onFilterTool: (name: string) => void;
-}) {
-  const ref = useRef<HTMLLIElement>(null);
-  useEffect(() => {
-    if (focus) ref.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, [focus]);
-
-  const err = req.status >= 400 || req.error;
-  const maxSpan = Math.max(1, ...spans.map((s) => s.duration_ms || 0));
-
-  return (
-    <li ref={ref} className="relative pb-3 pl-7">
-      {!isLast && <span className="absolute left-[9px] top-5 h-full w-px bg-border" />}
-      <span
-        className={cn(
-          "absolute left-1 top-[7px] h-3.5 w-3.5 rounded-full border-2 bg-background",
-          err ? "border-destructive" : "border-primary",
-        )}
-      />
-
-      <button
-        onClick={onSelect}
-        className={cn(
-          "flex w-full items-center gap-2 rounded-lg border bg-card px-3 py-2 text-left transition-colors",
-          selected ? "border-primary/40 bg-accent ring-1 ring-primary/30" : "hover:bg-muted/60",
-          focus && !selected && "ring-1 ring-ring",
-        )}
-      >
-        <span className="shrink-0 text-xs font-semibold text-muted-foreground">#{req.seq}</span>
-        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{fmtTime(req.ts_start)}</span>
-        {err ? (
-          <Badge variant="error">{req.status || "error"}</Badge>
-        ) : (
-          <Badge variant="success">{req.status}</Badge>
-        )}
-        <span className="min-w-0 flex-1 truncate text-sm text-foreground/80">
-          {req.assistant_preview || <span className="text-muted-foreground">{req.stop_reason || "—"}</span>}
-        </span>
-        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-          {fmtDuration(req.duration_ms)} · ↑{fmtTokens(req.in_tokens)} ↓{fmtTokens(req.out_tokens)}
-        </span>
-      </button>
-
-      {/* Reconstructed tool spans that ran after this request. */}
-      {spans.length > 0 && (
-        <div className="ml-3 mt-1.5 space-y-1">
-          {spans.map((sp) => (
-            <SpanBar key={sp.tool_use_id} sp={sp} max={maxSpan} onFilterTool={onFilterTool} />
-          ))}
-        </div>
-      )}
-    </li>
   );
 }
 

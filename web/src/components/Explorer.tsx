@@ -16,6 +16,7 @@ export function Explorer({ live, focus, clearFocus }: { live: LiveState; focus: 
   const [models, setModels] = useState<string[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [selectedReq, setSelectedReq] = useState<number | undefined>(undefined);
+  const [selectedBaseline, setSelectedBaseline] = useState<number | undefined>(undefined);
   const [focusReq, setFocusReq] = useState<number | undefined>(undefined);
   const [collapseNonce, setCollapseNonce] = useState(0);
   const [groupByThread, setGroupByThread] = useState(false);
@@ -56,6 +57,7 @@ export function Explorer({ live, focus, clearFocus }: { live: LiveState; focus: 
     if (focus) {
       setSelected(focus.sessionId);
       setSelectedReq(focus.requestId);
+      setSelectedBaseline(undefined); // jumped-to request: show full context
       setFocusReq(focus.requestId);
       clearFocus();
     }
@@ -64,6 +66,7 @@ export function Explorer({ live, focus, clearFocus }: { live: LiveState; focus: 
   function pickSession(id: number) {
     setSelected(id);
     setSelectedReq(undefined);
+    setSelectedBaseline(undefined);
   }
 
   return (
@@ -130,8 +133,9 @@ export function Explorer({ live, focus, clearFocus }: { live: LiveState; focus: 
             sessionId={selected}
             version={live.version}
             selectedRequest={selectedReq}
-            onSelectRequest={(id) => {
+            onSelectRequest={(id, baseline) => {
               setSelectedReq(id);
+              setSelectedBaseline(baseline);
               setFocusReq(undefined);
             }}
             focusRequest={focusReq}
@@ -162,7 +166,7 @@ export function Explorer({ live, focus, clearFocus }: { live: LiveState; focus: 
               </button>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <RequestBody requestId={selectedReq} collapseNonce={collapseNonce} />
+              <RequestBody requestId={selectedReq} collapseNonce={collapseNonce} baselineMessages={selectedBaseline} />
             </div>
           </>
         ) : (

@@ -218,10 +218,10 @@ func (s *Store) WriteExchange(r *Record) (sessionID, requestID int64, seq int, e
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_key) DO UPDATE SET
 			last_seen   = excluded.last_seen,
-			model       = COALESCE(NULLIF(excluded.model,''), sessions.model),
-			cwd         = COALESCE(NULLIF(sessions.cwd,''), NULLIF(excluded.cwd,'')),
-			git_branch  = COALESCE(NULLIF(sessions.git_branch,''), NULLIF(excluded.git_branch,'')),
-			cli_version = COALESCE(NULLIF(sessions.cli_version,''), NULLIF(excluded.cli_version,''))
+			model       = COALESCE(NULLIF(excluded.model,''), sessions.model, ''),
+			cwd         = COALESCE(NULLIF(sessions.cwd,''), NULLIF(excluded.cwd,''), ''),
+			git_branch  = COALESCE(NULLIF(sessions.git_branch,''), NULLIF(excluded.git_branch,''), ''),
+			cli_version = COALESCE(NULLIF(sessions.cli_version,''), NULLIF(excluded.cli_version,''), '')
 	`, r.SessionKey, start, end, r.Model, r.Cwd, r.GitBranch, r.CliVersion); err != nil {
 		return
 	}

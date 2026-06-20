@@ -1,5 +1,24 @@
 import type { RequestSummary } from "./api";
 
+// continuationRuns splits requests (in display order) into runs of consecutive
+// requests that continue the same conversation: same thread_key and a
+// non-shrinking message count, meaning each one just appends to the previous
+// one's history. A different thread, or a message count that drops (a context
+// reset / compaction), ends the run and starts a new one. The first request in
+// a run carries the full context; the rest only add new turns.
+export function continuationRuns(requests: RequestSummary[]): RequestSummary[][] {
+  const runs: RequestSummary[][] = [];
+  for (const r of requests) {
+    const run = runs[runs.length - 1];
+    const prev = run && run[run.length - 1];
+    const sameThread = prev && (prev.thread_key || "_") === (r.thread_key || "_");
+    const grows = prev && r.num_messages >= prev.num_messages;
+    if (prev && sameThread && grows) run.push(r);
+    else runs.push([r]);
+  }
+  return runs;
+}
+
 export interface Thread {
   key: string;
   label: string; // "main" or "subagent N"

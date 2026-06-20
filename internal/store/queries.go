@@ -56,7 +56,8 @@ func (s *Store) ListSessions(q SessionQuery) ([]SessionSummary, error) {
 		where = append(where, "s.id IN (SELECT session_id FROM blocks_fts WHERE blocks_fts MATCH ?)")
 		args = append(args, ftsQuery(q.Q))
 	}
-	sqlStr := "SELECT s.id, s.session_key, s.first_seen, s.last_seen, s.model, s.cwd, s.git_branch, s.cli_version, " +
+	sqlStr := "SELECT s.id, s.session_key, s.first_seen, s.last_seen, COALESCE(s.model,''), COALESCE(s.cwd,''), " +
+		"COALESCE(s.git_branch,''), COALESCE(s.cli_version,''), " +
 		"s.num_requests, s.in_tokens, s.out_tokens, s.cache_read, s.cache_write, s.est_cost, s.error_count FROM sessions s"
 	if len(where) > 0 {
 		sqlStr += " WHERE " + strings.Join(where, " AND ")
@@ -85,7 +86,8 @@ func (s *Store) ListSessions(q SessionQuery) ([]SessionSummary, error) {
 
 func (s *Store) getSessionSummary(id int64) (SessionSummary, error) {
 	var x SessionSummary
-	err := s.db.QueryRow(`SELECT id, session_key, first_seen, last_seen, model, cwd, git_branch, cli_version,
+	err := s.db.QueryRow(`SELECT id, session_key, first_seen, last_seen, COALESCE(model,''), COALESCE(cwd,''),
+		COALESCE(git_branch,''), COALESCE(cli_version,''),
 		num_requests, in_tokens, out_tokens, cache_read, cache_write, est_cost, error_count FROM sessions WHERE id = ?`, id).
 		Scan(&x.ID, &x.SessionKey, &x.FirstSeen, &x.LastSeen, &x.Model, &x.Cwd, &x.GitBranch, &x.CliVersion,
 			&x.NumRequests, &x.InTokens, &x.OutTokens, &x.CacheRead, &x.CacheWrite, &x.EstCost, &x.ErrorCount)
@@ -116,6 +118,7 @@ type RequestSummary struct {
 	EstCost          float64      `json:"est_cost"`
 	StopReason       string       `json:"stop_reason"`
 	NumTools         int          `json:"num_tools"`
+	NumMessages      int          `json:"num_messages"`
 	Error            string       `json:"error"`
 	AssistantPreview string       `json:"assistant_preview"`
 	ToolUses         []ToolUseRef `json:"tool_uses"`
@@ -154,7 +157,7 @@ func (s *Store) GetSession(id int64) (*SessionDetail, error) {
 	d := &SessionDetail{Session: sum, Requests: []RequestSummary{}, Spans: []Span{}}
 
 	rows, err := s.db.Query(`SELECT id, seq, COALESCE(thread_key,''), ts_start, ts_end, duration_ms, status, model, in_tokens, out_tokens,
-		cache_read, cache_write, est_cost, stop_reason, num_tools, error FROM requests WHERE session_id = ? ORDER BY seq`, id)
+		cache_read, cache_write, est_cost, stop_reason, num_tools, num_messages, error FROM requests WHERE session_id = ? ORDER BY seq`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +166,7 @@ func (s *Store) GetSession(id int64) (*SessionDetail, error) {
 	for rows.Next() {
 		var r RequestSummary
 		if err := rows.Scan(&r.ID, &r.Seq, &r.ThreadKey, &r.TsStart, &r.TsEnd, &r.DurationMs, &r.Status, &r.Model,
-			&r.InTokens, &r.OutTokens, &r.CacheRead, &r.CacheWrite, &r.EstCost, &r.StopReason, &r.NumTools, &r.Error); err != nil {
+			&r.InTokens, &r.OutTokens, &r.CacheRead, &r.CacheWrite, &r.EstCost, &r.StopReason, &r.NumTools, &r.NumMessages, &r.Error); err != nil {
 			return nil, err
 		}
 		r.ToolUses = []ToolUseRef{}
