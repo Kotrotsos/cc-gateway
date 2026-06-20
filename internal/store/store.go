@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -94,7 +95,8 @@ CREATE TABLE IF NOT EXISTS requests (
   stop_reason  TEXT,
   num_messages INTEGER NOT NULL DEFAULT 0,
   num_tools    INTEGER NOT NULL DEFAULT 0,
-  error        TEXT
+  error        TEXT,
+  thread_key   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_requests_session ON requests(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts_start);
@@ -121,7 +123,25 @@ CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
 `
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// Bring older databases up to date: the CREATE TABLE above is a no-op when
+	// the table already exists, so new columns need an explicit (idempotent) ALTER.
+	if err := s.addColumn("requests", "thread_key", "TEXT"); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_requests_thread ON requests(session_id, thread_key)`)
+	return err
+}
+
+// addColumn adds a column if it is missing, treating the "duplicate column"
+// error from an already-migrated database as success.
+func (s *Store) addColumn(table, col, typ string) error {
+	_, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, col, typ))
+	if err != nil && strings.Contains(err.Error(), "duplicate column name") {
+		return nil
+	}
 	return err
 }
 
@@ -141,6 +161,7 @@ type BlockRow struct {
 // it; the store turns it into rows.
 type Record struct {
 	SessionKey string
+	ThreadKey  string
 	Model      string
 	Cwd        string
 	GitBranch  string
@@ -221,12 +242,12 @@ func (s *Store) WriteExchange(r *Record) (sessionID, requestID int64, seq int, e
 	res, err := tx.Exec(`
 		INSERT INTO requests (session_id, seq, ts_start, ts_end, duration_ms, method, path, status,
 			model, stream, is_sse, req_blob, resp_blob, truncated, in_tokens, out_tokens,
-			cache_read, cache_write, est_cost, stop_reason, num_messages, num_tools, error)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			cache_read, cache_write, est_cost, stop_reason, num_messages, num_tools, error, thread_key)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		sessionID, seq, start, end, r.DurationMs, r.Method, r.Path, r.Status,
 		r.Model, b2i(r.Stream), b2i(r.IsSSE), reqBlob, respBlob, b2i(r.Truncated),
 		r.In, r.Out, r.CacheRead, r.CacheWrite, r.EstCost, r.StopReason,
-		r.NumMessages, r.NumTools, r.Error)
+		r.NumMessages, r.NumTools, r.Error, r.ThreadKey)
 	if err != nil {
 		return
 	}

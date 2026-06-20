@@ -40,6 +40,7 @@ func build(ev *Event) (*store.Record, Written) {
 	sysText := req.SystemText()
 	rec := &store.Record{
 		SessionKey:  sessionKey(req.MetadataUser, sysText),
+		ThreadKey:   threadKey(req.Messages, sysText),
 		Model:       model,
 		Cwd:         mineCwd(sysText),
 		GitBranch:   mineBranch(sysText),
@@ -182,6 +183,40 @@ func sessionKey(metaUser, sysText string) string {
 	}
 	sum := sha1.Sum([]byte(sysText))
 	return "anon_" + hex.EncodeToString(sum[:])[:12]
+}
+
+// threadKey identifies the conversation a request belongs to. A Claude Code CLI
+// session reuses one session id for the main thread and every subagent it
+// spawns, but each conversation has its own stable opening: the first user
+// message is resent verbatim on every request of that thread. Hashing it groups
+// a thread together while keeping the main thread and each subagent distinct.
+// The system prompt carries volatile bits (the date), so it is only a fallback.
+func threadKey(msgs []parse.Message, sysText string) string {
+	opening := ""
+	for _, m := range msgs {
+		if m.Role == "user" {
+			if t := messageText(m); t != "" {
+				opening = t
+				break
+			}
+		}
+	}
+	if opening == "" {
+		opening = sysText
+	}
+	sum := sha1.Sum([]byte(opening))
+	return "t_" + hex.EncodeToString(sum[:])[:12]
+}
+
+// messageText concatenates the plain-text content of a message.
+func messageText(m parse.Message) string {
+	var b strings.Builder
+	for _, blk := range m.Content {
+		if blk.Text != "" {
+			b.WriteString(blk.Text)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 var cwdRe = regexp.MustCompile(`(?i)(?:current\s+)?working directory:\s*(.+)`)

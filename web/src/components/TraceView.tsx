@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Folder, GitBranch, Terminal } from "lucide-react";
+import { AlertTriangle, Folder, GitBranch, Layers, Terminal } from "lucide-react";
 import { api, type RequestSummary, type SessionDetail, type Span } from "@/lib/api";
 import { cn, fmtCost, fmtDateTime, fmtDuration, fmtTime, fmtTokens, shortModel } from "@/lib/utils";
+import { groupThreads } from "@/lib/threads";
 import { Badge } from "./ui/primitives";
 
 // TraceView is the middle panel: a selectable list of the session's requests
 // (#1, #2, …) with the tool spans that ran after each. The selected request's
 // full message exchange is rendered by the parent in a separate detail panel.
+// Requests can optionally be grouped by conversation thread (main + subagents).
 export function TraceView({
   sessionId,
   version,
@@ -14,6 +16,8 @@ export function TraceView({
   onSelectRequest,
   focusRequest,
   onFilterTool,
+  groupByThread,
+  onToggleGroup,
 }: {
   sessionId: number;
   version: number;
@@ -21,6 +25,8 @@ export function TraceView({
   onSelectRequest: (id: number) => void;
   focusRequest?: number;
   onFilterTool: (name: string) => void;
+  groupByThread: boolean;
+  onToggleGroup: () => void;
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
 
@@ -42,6 +48,8 @@ export function TraceView({
     return m;
   }, [detail]);
 
+  const threads = useMemo(() => groupThreads(detail?.requests ?? []), [detail]);
+
   if (!detail) {
     return <div className="p-6 text-sm text-muted-foreground">Loading trace…</div>;
   }
@@ -58,6 +66,19 @@ export function TraceView({
             <Badge variant="error">
               <AlertTriangle className="h-3 w-3" /> {s.error_count}
             </Badge>
+          )}
+          {threads.length > 1 && (
+            <button
+              onClick={onToggleGroup}
+              className={cn(
+                "ml-auto flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors",
+                groupByThread ? "border-primary/40 bg-accent text-foreground" : "text-muted-foreground hover:bg-muted/60",
+              )}
+              title="Group requests by conversation thread (main + subagents)"
+            >
+              <Layers className="h-3 w-3" />
+              Group by thread
+            </button>
           )}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -92,22 +113,74 @@ export function TraceView({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-        <ol className="relative">
-          {detail.requests.map((r, i) => (
-            <RequestNode
-              key={r.id}
-              req={r}
-              isLast={i === detail.requests.length - 1}
-              spans={spansByCall.get(r.id) ?? []}
-              selected={r.id === selectedRequest}
-              focus={r.id === focusRequest}
-              onSelect={() => onSelectRequest(r.id)}
-              onFilterTool={onFilterTool}
-            />
-          ))}
-        </ol>
+        {groupByThread && threads.length > 1 ? (
+          <div className="space-y-4">
+            {threads.map((t) => (
+              <div key={t.key}>
+                <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide">
+                  <Layers className={cn("h-3 w-3", t.isMain ? "text-primary" : "text-muted-foreground")} />
+                  <span className={t.isMain ? "text-foreground" : "text-muted-foreground"}>{t.label}</span>
+                  <span className="font-normal normal-case text-muted-foreground">
+                    {t.requests.length} req · {shortModel(t.peak.model)}
+                  </span>
+                </div>
+                <RequestRows
+                  requests={t.requests}
+                  spansByCall={spansByCall}
+                  selectedRequest={selectedRequest}
+                  focusRequest={focusRequest}
+                  onSelectRequest={onSelectRequest}
+                  onFilterTool={onFilterTool}
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <RequestRows
+            requests={detail.requests}
+            spansByCall={spansByCall}
+            selectedRequest={selectedRequest}
+            focusRequest={focusRequest}
+            onSelectRequest={onSelectRequest}
+            onFilterTool={onFilterTool}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+// RequestRows renders an ordered list of request nodes with the timeline rail.
+function RequestRows({
+  requests,
+  spansByCall,
+  selectedRequest,
+  focusRequest,
+  onSelectRequest,
+  onFilterTool,
+}: {
+  requests: RequestSummary[];
+  spansByCall: Map<number, Span[]>;
+  selectedRequest?: number;
+  focusRequest?: number;
+  onSelectRequest: (id: number) => void;
+  onFilterTool: (name: string) => void;
+}) {
+  return (
+    <ol className="relative">
+      {requests.map((r, i) => (
+        <RequestNode
+          key={r.id}
+          req={r}
+          isLast={i === requests.length - 1}
+          spans={spansByCall.get(r.id) ?? []}
+          selected={r.id === selectedRequest}
+          focus={r.id === focusRequest}
+          onSelect={() => onSelectRequest(r.id)}
+          onFilterTool={onFilterTool}
+        />
+      ))}
+    </ol>
   );
 }
 

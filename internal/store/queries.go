@@ -103,6 +103,7 @@ type ToolUseRef struct {
 type RequestSummary struct {
 	ID               int64        `json:"id"`
 	Seq              int          `json:"seq"`
+	ThreadKey        string       `json:"thread_key"`
 	TsStart          int64        `json:"ts_start"`
 	TsEnd            int64        `json:"ts_end"`
 	DurationMs       int64        `json:"duration_ms"`
@@ -152,7 +153,7 @@ func (s *Store) GetSession(id int64) (*SessionDetail, error) {
 	}
 	d := &SessionDetail{Session: sum, Requests: []RequestSummary{}, Spans: []Span{}}
 
-	rows, err := s.db.Query(`SELECT id, seq, ts_start, ts_end, duration_ms, status, model, in_tokens, out_tokens,
+	rows, err := s.db.Query(`SELECT id, seq, COALESCE(thread_key,''), ts_start, ts_end, duration_ms, status, model, in_tokens, out_tokens,
 		cache_read, cache_write, est_cost, stop_reason, num_tools, error FROM requests WHERE session_id = ? ORDER BY seq`, id)
 	if err != nil {
 		return nil, err
@@ -161,7 +162,7 @@ func (s *Store) GetSession(id int64) (*SessionDetail, error) {
 	byID := map[int64]*RequestSummary{}
 	for rows.Next() {
 		var r RequestSummary
-		if err := rows.Scan(&r.ID, &r.Seq, &r.TsStart, &r.TsEnd, &r.DurationMs, &r.Status, &r.Model,
+		if err := rows.Scan(&r.ID, &r.Seq, &r.ThreadKey, &r.TsStart, &r.TsEnd, &r.DurationMs, &r.Status, &r.Model,
 			&r.InTokens, &r.OutTokens, &r.CacheRead, &r.CacheWrite, &r.EstCost, &r.StopReason, &r.NumTools, &r.Error); err != nil {
 			return nil, err
 		}

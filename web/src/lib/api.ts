@@ -27,6 +27,7 @@ export interface ToolUseRef {
 export interface RequestSummary {
   id: number;
   seq: number;
+  thread_key: string;
   ts_start: number;
   ts_end: number;
   duration_ms: number;

@@ -18,6 +18,7 @@ export function Explorer({ live, focus, clearFocus }: { live: LiveState; focus: 
   const [selectedReq, setSelectedReq] = useState<number | undefined>(undefined);
   const [focusReq, setFocusReq] = useState<number | undefined>(undefined);
   const [collapseNonce, setCollapseNonce] = useState(0);
+  const [groupByThread, setGroupByThread] = useState(false);
 
   const [model, setModel] = useState("");
   const [tool, setTool] = useState("");
@@ -135,6 +136,8 @@ export function Explorer({ live, focus, clearFocus }: { live: LiveState; focus: 
             }}
             focusRequest={focusReq}
             onFilterTool={setTool}
+            groupByThread={groupByThread}
+            onToggleGroup={() => setGroupByThread((v) => !v)}
           />
         ) : (
           <Placeholder>Select a session to view its requests.</Placeholder>
