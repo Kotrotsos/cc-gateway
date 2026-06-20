@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Braces, ChevronDown, X } from "lucide-react";
 import { api, type ContentBlock, type Message, type RequestDetail } from "@/lib/api";
@@ -114,11 +114,11 @@ function TextBlock({ text, muted, mono }: { text: string; muted?: boolean; mono?
   const [open, setOpen] = useState(false);
   const lines = text.replace(/\r/g, "").replace(/\n+$/, "").split("\n");
   const hasMore = lines.length > 2 || text.length > 240;
-  const shown = open ? text : lines.slice(0, 2).join("\n");
+  const shown = open ? text : truncate(lines.slice(0, 2).join("\n"), 240);
   if (!text.trim()) return null;
   return (
     <div className={cn("group whitespace-pre-wrap break-words text-xs leading-relaxed", muted && "text-muted-foreground", mono && "font-mono")}>
-      {open ? text : truncate(shown, 240)}
+      {mono ? shown : renderInlineCode(shown)}
       {hasMore && (
         <button onClick={() => setOpen((v) => !v)} className="ml-1 inline-flex items-center gap-0.5 align-baseline text-[11px] font-medium text-primary hover:underline">
           {open ? "less" : "more"}
@@ -217,4 +217,36 @@ function resultToText(content: unknown): string {
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+// renderInlineCode lightly styles `inline` and ```fenced``` code spans so code
+// stands out from surrounding prose. The parent keeps whitespace-pre-wrap, so
+// fenced blocks retain their newlines.
+function renderInlineCode(text: string): ReactNode {
+  const re = /```([\s\S]*?)```|`([^`\n]+)`/g;
+  const parts: ReactNode[] = [];
+  let last = 0;
+  let key = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    if (m[1] !== undefined) {
+      // Drop an optional language hint on the first line and trim edge newlines.
+      const code = m[1].replace(/^[a-zA-Z0-9+#._-]*\n/, "").replace(/^\n+|\n+$/g, "");
+      parts.push(
+        <code key={key++} className="my-0.5 block overflow-x-auto rounded-md border bg-muted/60 px-2 py-1 font-mono text-[0.92em] text-foreground">
+          {code}
+        </code>,
+      );
+    } else {
+      parts.push(
+        <code key={key++} className="rounded border bg-muted/70 px-1 font-mono text-[0.9em] text-foreground">
+          {m[2]}
+        </code>,
+      );
+    }
+    last = re.lastIndex;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
 }
