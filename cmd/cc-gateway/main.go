@@ -52,6 +52,13 @@ func main() {
 			os.Exit(1)
 		}
 		defer st.Close()
+		// Recover token usage for any exchanges recorded before responses were
+		// decoded properly. No-op once everything has been parsed.
+		if n, berr := ingest.Backfill(st); berr != nil {
+			fmt.Fprintf(os.Stderr, "backfill: %v\n", berr)
+		} else if n > 0 {
+			fmt.Fprintf(os.Stderr, "backfilled usage for %d requests\n", n)
+		}
 		sink = ingest.NewSink(st, 1024)
 		defer sink.Close()
 	}

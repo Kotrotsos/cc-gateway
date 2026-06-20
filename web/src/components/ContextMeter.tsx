@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Layers } from "lucide-react";
 import { api, type SessionDetail } from "@/lib/api";
-import { cn, contextWindow, fmtTokens, shortModel } from "@/lib/utils";
+import { cn, contextWindowFor, fmtTokens, shortModel } from "@/lib/utils";
 import { groupThreads, type Thread } from "@/lib/threads";
 
 // ContextMeter shows how full the model's context window is, refreshing on every
@@ -52,7 +52,7 @@ export function ContextMeter({ sessionId, version }: { sessionId: number; versio
 
 function ThreadBar({ t, solo }: { t: Thread; solo: boolean }) {
   const model = t.peak.model;
-  const win = contextWindow(model);
+  const win = contextWindowFor(model, t.peakTotal);
   const pct = win > 0 ? Math.min(100, (t.peakTotal / win) * 100) : 0;
   const seg = (n: number) => (win > 0 ? (n / win) * 100 : 0);
   const cached = seg(t.peak.cache_read);

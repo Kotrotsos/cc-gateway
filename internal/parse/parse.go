@@ -6,7 +6,9 @@ package parse
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"sort"
 	"strings"
 )
@@ -120,12 +122,30 @@ type rawResponse struct {
 
 // ParseResponse decodes an assistant reply. When isSSE is true the body is an
 // event stream that is reassembled back into content blocks; otherwise it is a
-// single JSON message. OK is false for non-message payloads (errors, other
-// endpoints) so callers can fall back to raw bytes.
+// single JSON message. The body is transparently gunzipped first, since upstream
+// responses are gzip-encoded whenever the client advertised it. OK is false for
+// non-message payloads (errors, other endpoints) so callers can fall back to raw
+// bytes.
 func ParseResponse(body []byte, isSSE bool) ParsedResponse {
+	body = maybeGunzip(body)
 	if isSSE {
 		return reassembleSSE(body)
 	}
+	return parseJSONResponse(body)
+}
+
+// ParseResponseAuto is like ParseResponse but determines on its own whether the
+// (decompressed) body is an SSE stream or a single JSON message. Used when the
+// stored is_sse flag is unreliable, e.g. re-parsing historical rows.
+func ParseResponseAuto(body []byte) ParsedResponse {
+	body = maybeGunzip(body)
+	if looksSSE(body) {
+		return reassembleSSE(body)
+	}
+	return parseJSONResponse(body)
+}
+
+func parseJSONResponse(body []byte) ParsedResponse {
 	var pr ParsedResponse
 	if len(body) == 0 || body[0] != '{' {
 		return pr
@@ -140,6 +160,35 @@ func ParseResponse(body []byte, isSSE bool) ParsedResponse {
 	pr.StopReason = rr.StopReason
 	pr.Usage = rr.Usage
 	return pr
+}
+
+// IsSSEBody reports whether a (possibly gzip-compressed) response body is an
+// Anthropic event stream.
+func IsSSEBody(body []byte) bool { return looksSSE(maybeGunzip(body)) }
+
+// maybeGunzip decompresses body when it is gzip-compressed, returning it
+// unchanged on any error or when it is not gzip.
+func maybeGunzip(body []byte) []byte {
+	if len(body) < 2 || body[0] != 0x1f || body[1] != 0x8b {
+		return body
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return body
+	}
+	defer zr.Close()
+	out, err := io.ReadAll(zr)
+	if err != nil || len(out) == 0 {
+		return body
+	}
+	return out
+}
+
+// looksSSE reports whether body is an event stream (rather than a JSON message).
+func looksSSE(body []byte) bool {
+	head := bytes.TrimLeft(body, " \r\n\t")
+	return bytes.HasPrefix(head, []byte("event:")) || bytes.HasPrefix(head, []byte("data:")) ||
+		bytes.Contains(body, []byte("\ndata:"))
 }
 
 // decodeContent normalizes a message/system content value — which may be a bare

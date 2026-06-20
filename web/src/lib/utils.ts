@@ -57,6 +57,16 @@ export function contextWindow(model: string): number {
   return 200_000;
 }
 
+// contextWindowFor sizes the window from the model id and, as a fallback, the
+// observed prompt size. The 1M-context beta is requested via a header the
+// gateway doesn't capture, so the model id often reads as the base model; a
+// prompt larger than the 200k base tier can only be the 1M window.
+export function contextWindowFor(model: string, peakTokens: number): number {
+  const base = contextWindow(model);
+  if (peakTokens > 200_000) return 1_000_000;
+  return base;
+}
+
 // shortModel trims the long model id to its memorable part, e.g.
 // "claude-opus-4-8-20260101" -> "opus-4-8".
 export function shortModel(model: string): string {

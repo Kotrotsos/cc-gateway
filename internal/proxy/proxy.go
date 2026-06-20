@@ -71,6 +71,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(outReq.Header, r.Header)
 	stripHopHeaders(outReq.Header)
 	outReq.Host = h.upstream.Host
+	// Ask upstream for an uncompressed response. Claude Code advertises gzip, and
+	// a gzip-encoded body cannot be tapped for token usage or reassembled from SSE
+	// without first decoding it. Requesting identity keeps the captured bytes
+	// readable; the content forwarded to the client is unchanged bar its transfer
+	// encoding. (Parsing also tolerates gzip as a backstop if upstream ignores this.)
+	outReq.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := h.client.Do(outReq)
 	if err != nil {
@@ -88,8 +94,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	flusher, _ := w.(http.Flusher)
 	ct := resp.Header.Get("Content-Type")
-	enc := resp.Header.Get("Content-Encoding")
-	isSSE := strings.Contains(ct, "text/event-stream") && enc == ""
+	isSSE := strings.Contains(ct, "text/event-stream")
 
 	var stats *parse.LiveStats
 	if isSSE {
