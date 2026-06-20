@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# 1. Build the React UI into web/dist.
-FROM node:22-alpine AS ui
+# 1. Build the React UI into web/dist. Runs on the native build platform (not the
+#    target arch) so multi-arch builds don't emulate this heavy step.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS ui
 WORKDIR /app/web
 RUN corepack enable
 COPY web/package.json web/pnpm-lock.yaml ./
@@ -10,14 +11,17 @@ COPY web/ ./
 RUN pnpm build
 
 # 2. Build the single static Go binary that embeds the UI. The SQLite driver is
-#    pure Go (modernc), so CGO can stay off and the result runs on scratch.
-FROM golang:1.25-alpine AS build
+#    pure Go (modernc), so CGO stays off and we cross-compile to the target arch
+#    natively — fast, no QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=ui /app/web/dist ./web/dist
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /cc-gateway ./cmd/cc-gateway
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /cc-gateway ./cmd/cc-gateway
 RUN mkdir -p /data
 
 # 3. Minimal runtime: just the binary plus a writable /data for the database.

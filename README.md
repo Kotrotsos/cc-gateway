@@ -12,6 +12,38 @@ The proxy path is sacred: persistence runs entirely off the hot path
 disabled, forwarding is unaffected. `-no-store` turns persistence off entirely
 for the original pure-proxy behavior.
 
+## Quick start
+
+No clone, no build. Pick one:
+
+**Docker** (only needs Docker installed):
+
+```sh
+docker run -d --name cc-gateway \
+  -p 8443:8443 -p 8088:8088 -v cc-gateway:/data \
+  ghcr.io/kotrotsos/cc-gateway
+```
+
+**Binary** (macOS / Linux):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kotrotsos/cc-gateway/main/install.sh | sh
+cc-gateway
+```
+
+Then point Claude Code at the proxy and open the UI:
+
+```sh
+export ANTHROPIC_BASE_URL=http://localhost:8443
+claude
+```
+
+- Web UI: <http://localhost:8088>
+- Your existing Claude subscription token / `ANTHROPIC_API_KEY` passes straight through.
+
+> Keep it local. The UI is unauthenticated and stores full prompts/code/tool
+> output; don't expose `:8088` on the open internet.
+
 ## What you get
 
 - **Explorer** — every Claude Code session as one trace from start to finish.
