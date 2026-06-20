@@ -1,25 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ChevronRight, Folder, GitBranch, Terminal } from "lucide-react";
+import { AlertTriangle, Folder, GitBranch, Terminal } from "lucide-react";
 import { api, type RequestSummary, type SessionDetail, type Span } from "@/lib/api";
 import { cn, fmtCost, fmtDateTime, fmtDuration, fmtTime, fmtTokens, shortModel } from "@/lib/utils";
 import { Badge } from "./ui/primitives";
-import { RequestBody } from "./RequestBody";
 
+// TraceView is the middle panel: a selectable list of the session's requests
+// (#1, #2, …) with the tool spans that ran after each. The selected request's
+// full message exchange is rendered by the parent in a separate detail panel.
 export function TraceView({
   sessionId,
   version,
+  selectedRequest,
+  onSelectRequest,
   focusRequest,
-  onFocusConsumed,
   onFilterTool,
 }: {
   sessionId: number;
   version: number;
+  selectedRequest?: number;
+  onSelectRequest: (id: number) => void;
   focusRequest?: number;
-  onFocusConsumed: () => void;
   onFilterTool: (name: string) => void;
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -29,13 +32,6 @@ export function TraceView({
     };
   }, [sessionId, version]);
 
-  // Auto-expand and scroll to a focused request (jumped from Analytics).
-  useEffect(() => {
-    if (focusRequest != null) {
-      setExpanded((s) => new Set(s).add(focusRequest));
-    }
-  }, [focusRequest, detail?.session.id]);
-
   const spansByCall = useMemo(() => {
     const m = new Map<number, Span[]>();
     detail?.spans.forEach((sp) => {
@@ -43,12 +39,6 @@ export function TraceView({
       arr.push(sp);
       m.set(sp.call_request_id, arr);
     });
-    return m;
-  }, [detail]);
-
-  const spanByToolUse = useMemo(() => {
-    const m = new Map<string, Span>();
-    detail?.spans.forEach((sp) => m.set(sp.tool_use_id, sp));
     return m;
   }, [detail]);
 
@@ -109,17 +99,9 @@ export function TraceView({
               req={r}
               isLast={i === detail.requests.length - 1}
               spans={spansByCall.get(r.id) ?? []}
-              spanByToolUse={spanByToolUse}
-              expanded={expanded.has(r.id)}
+              selected={r.id === selectedRequest}
               focus={r.id === focusRequest}
-              onToggle={() => {
-                setExpanded((set) => {
-                  const next = new Set(set);
-                  next.has(r.id) ? next.delete(r.id) : next.add(r.id);
-                  return next;
-                });
-                onFocusConsumed();
-              }}
+              onSelect={() => onSelectRequest(r.id)}
               onFilterTool={onFilterTool}
             />
           ))}
@@ -142,19 +124,17 @@ function RequestNode({
   req,
   isLast,
   spans,
-  spanByToolUse,
-  expanded,
+  selected,
   focus,
-  onToggle,
+  onSelect,
   onFilterTool,
 }: {
   req: RequestSummary;
   isLast: boolean;
   spans: Span[];
-  spanByToolUse: Map<string, Span>;
-  expanded: boolean;
+  selected: boolean;
   focus: boolean;
-  onToggle: () => void;
+  onSelect: () => void;
   onFilterTool: (name: string) => void;
 }) {
   const ref = useRef<HTMLLIElement>(null);
@@ -175,31 +155,28 @@ function RequestNode({
         )}
       />
 
-      <div
+      <button
+        onClick={onSelect}
         className={cn(
-          "rounded-lg border bg-card transition-colors",
-          focus && "ring-1 ring-ring",
+          "flex w-full items-center gap-2 rounded-lg border bg-card px-3 py-2 text-left transition-colors",
+          selected ? "border-primary/40 bg-accent ring-1 ring-primary/30" : "hover:bg-muted/60",
+          focus && !selected && "ring-1 ring-ring",
         )}
       >
-        <button onClick={onToggle} className="flex w-full items-center gap-2 px-3 py-2 text-left">
-          <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")} />
-          <span className="shrink-0 text-xs font-semibold text-muted-foreground">#{req.seq}</span>
-          <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{fmtTime(req.ts_start)}</span>
-          {err ? (
-            <Badge variant="error">{req.status || "error"}</Badge>
-          ) : (
-            <Badge variant="success">{req.status}</Badge>
-          )}
-          <span className="min-w-0 flex-1 truncate text-sm text-foreground/80">
-            {req.assistant_preview || <span className="text-muted-foreground">{req.stop_reason || "—"}</span>}
-          </span>
-          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-            {fmtDuration(req.duration_ms)} · ↑{fmtTokens(req.in_tokens)} ↓{fmtTokens(req.out_tokens)}
-          </span>
-        </button>
-
-        {expanded && <RequestBody requestId={req.id} />}
-      </div>
+        <span className="shrink-0 text-xs font-semibold text-muted-foreground">#{req.seq}</span>
+        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{fmtTime(req.ts_start)}</span>
+        {err ? (
+          <Badge variant="error">{req.status || "error"}</Badge>
+        ) : (
+          <Badge variant="success">{req.status}</Badge>
+        )}
+        <span className="min-w-0 flex-1 truncate text-sm text-foreground/80">
+          {req.assistant_preview || <span className="text-muted-foreground">{req.stop_reason || "—"}</span>}
+        </span>
+        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          {fmtDuration(req.duration_ms)} · ↑{fmtTokens(req.in_tokens)} ↓{fmtTokens(req.out_tokens)}
+        </span>
+      </button>
 
       {/* Reconstructed tool spans that ran after this request. */}
       {spans.length > 0 && (

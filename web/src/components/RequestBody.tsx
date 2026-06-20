@@ -5,7 +5,7 @@ import { api, type ContentBlock, type Message, type RequestDetail } from "@/lib/
 import { cn, fmtCost, fmtTokens } from "@/lib/utils";
 import { Badge, Button } from "./ui/primitives";
 
-export function RequestBody({ requestId }: { requestId: number }) {
+export function RequestBody({ requestId, collapseNonce }: { requestId: number; collapseNonce?: number }) {
   const [detail, setDetail] = useState<RequestDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -38,7 +38,8 @@ export function RequestBody({ requestId }: { requestId: number }) {
         <RawDialog requestId={requestId} />
       </div>
 
-      <div className="space-y-2.5 px-3 py-3">
+      {/* Remounting on collapseNonce resets every TextBlock's local "more" state. */}
+      <div key={collapseNonce} className="space-y-2.5 px-3 py-3">
         {detail.system.length > 0 && <Turn role="system" content={detail.system} />}
         {detail.messages.map((m, i) => (
           <Turn key={i} role={m.role} content={m.content} />
