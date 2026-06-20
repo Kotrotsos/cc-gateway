@@ -49,6 +49,14 @@ export function fmtRelative(ms: number): string {
   return Math.floor(h / 24) + "d ago";
 }
 
+// contextWindow returns the model's prompt token limit. Claude models default
+// to 200k; the explicit [1m] variant (and other 1M-context betas) get 1M.
+export function contextWindow(model: string): number {
+  if (!model) return 200_000;
+  if (/\[1m\]/i.test(model) || /1m/i.test(model)) return 1_000_000;
+  return 200_000;
+}
+
 // shortModel trims the long model id to its memorable part, e.g.
 // "claude-opus-4-8-20260101" -> "opus-4-8".
 export function shortModel(model: string): string {

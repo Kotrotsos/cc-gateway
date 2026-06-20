@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { SessionRow } from "./SessionList";
 import { TraceView } from "./TraceView";
 import { RequestBody } from "./RequestBody";
+import { ContextMeter } from "./ContextMeter";
 
 export function Explorer({ live, focus, clearFocus }: { live: LiveState; focus: Focus; clearFocus: () => void }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -65,8 +66,10 @@ export function Explorer({ live, focus, clearFocus }: { live: LiveState; focus: 
   }
 
   return (
-    <PanelGroup direction="horizontal" autoSaveId="cc-explorer" className="h-full">
-      {/* Sessions / projects */}
+    <div className="flex h-full flex-col">
+      {selected != null && <ContextMeter sessionId={selected} version={live.version} />}
+      <PanelGroup direction="horizontal" autoSaveId="cc-explorer" className="min-h-0 flex-1">
+        {/* Sessions / projects */}
       <Panel defaultSize={24} minSize={15} className="flex flex-col border-r">
         <div className="flex flex-col gap-2 border-b p-2.5">
           <div className="relative">
@@ -162,8 +165,9 @@ export function Explorer({ live, focus, clearFocus }: { live: LiveState; focus: 
         ) : (
           <Placeholder>Select a request to view its messages.</Placeholder>
         )}
-      </Panel>
-    </PanelGroup>
+        </Panel>
+      </PanelGroup>
+    </div>
   );
 }
 
