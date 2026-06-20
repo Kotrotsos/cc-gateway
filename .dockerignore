@@ -1,0 +1,11 @@
+# The image rebuilds these; keep the build context small and stale-free.
+.git
+web/node_modules
+web/dist
+cc-gateway
+cc-gateway.db
+cc-gateway.db-wal
+cc-gateway.db-shm
+*.log
+artifacts
+.claude

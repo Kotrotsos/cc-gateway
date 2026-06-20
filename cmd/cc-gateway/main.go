@@ -21,6 +21,7 @@ import (
 )
 
 var (
+	host     = flag.String("host", "localhost", "interface to bind on (use 0.0.0.0 to expose, e.g. in a container)")
 	port     = flag.String("port", "8443", "local port the proxy listens on")
 	uiPort   = flag.String("ui-port", "8088", "local port the web UI/API listens on")
 	dbPath   = flag.String("db", "cc-gateway.db", "path to the SQLite database")
@@ -41,6 +42,13 @@ func main() {
 	}
 
 	con := term.New(*noColor, *showBody)
+
+	// displayHost is what we print in URLs; a wildcard bind is reached via
+	// localhost from the same machine (or the mapped port from a container host).
+	displayHost := *host
+	if displayHost == "0.0.0.0" || displayHost == "" || displayHost == "::" {
+		displayHost = "localhost"
+	}
 
 	// Persistence + ingest (optional).
 	var sink *ingest.Sink
@@ -71,9 +79,9 @@ func main() {
 			bus = sink.Bus()
 		}
 		srv := api.New(st, bus, web.FS())
-		uiURL = "http://localhost:" + *uiPort
+		uiURL = "http://" + displayHost + ":" + *uiPort
 		go func() {
-			s := &http.Server{Addr: "localhost:" + *uiPort, Handler: srv.Handler()}
+			s := &http.Server{Addr: *host + ":" + *uiPort, Handler: srv.Handler()}
 			if err := s.ListenAndServe(); err != nil {
 				fmt.Fprintf(os.Stderr, "ui server error: %v\n", err)
 			}
@@ -93,10 +101,10 @@ func main() {
 	h := proxy.New(up, client, con, sink)
 
 	keys := con.StartKeyboard()
-	con.Banner("http://localhost:"+*port, up.String(), uiURL, keys)
+	con.Banner("http://"+displayHost+":"+*port, up.String(), uiURL, keys)
 
 	srv := &http.Server{
-		Addr:              "localhost:" + *port,
+		Addr:              *host + ":" + *port,
 		Handler:           h,
 		ReadHeaderTimeout: 30 * time.Second,
 	}

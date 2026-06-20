@@ -1,4 +1,4 @@
-.PHONY: build ui dev-api dev-ui test fmt clean
+.PHONY: build ui dev-api dev-ui test fmt clean docker docker-up docker-down
 
 # Build the web UI then the single self-contained binary that embeds it.
 build: ui
@@ -25,3 +25,14 @@ fmt:
 
 clean:
 	rm -f cc-gateway cc-gateway.db cc-gateway.db-wal cc-gateway.db-shm
+
+# Build the self-contained Docker image (UI + binary, no toolchain needed).
+docker:
+	docker build -t cc-gateway .
+
+# Super-easy deploy: build and run in the background with a persistent DB volume.
+docker-up:
+	docker compose up -d --build
+
+docker-down:
+	docker compose down

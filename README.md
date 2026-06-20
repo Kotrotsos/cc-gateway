@@ -58,6 +58,36 @@ Your existing OAuth token (subscription) or `ANTHROPIC_API_KEY` passes straight
 through; the gateway needs no credentials. Open the web UI and watch the session
 appear live.
 
+## Deploy
+
+The whole thing is one static binary plus a SQLite file, so deploying is just
+running it somewhere with a persistent volume. No toolchain needed on the host.
+
+**Docker (recommended):**
+
+```sh
+make docker-up        # docker compose up -d --build
+# or: docker compose up -d --build
+```
+
+That builds the image (UI + binary), runs it detached, and persists the
+database in a named `ccdata` volume. Then:
+
+- Proxy: `http://<host>:8443` — set `ANTHROPIC_BASE_URL` to this
+- Web UI: `http://<host>:8088`
+
+`make docker-down` stops it; the volume (and your recorded history) survives.
+
+Because the image is a single static binary, the same `Dockerfile` deploys
+unchanged to any container host (Fly.io, Railway, Render, a plain VPS). The
+binary binds `0.0.0.0` inside the container via `-host`; locally it still
+defaults to `localhost`.
+
+> **Heads up before exposing it publicly.** The web UI has no authentication and
+> the database records full request/response bodies (your prompts, code, tool
+> output). Keep it on a private network, behind your own auth proxy, or bound to
+> `localhost` / a VPN. Don't put the UI on the open internet as-is.
+
 ## Development
 
 ```sh
@@ -82,6 +112,7 @@ gateway runs in an interactive terminal:
 
 | flag         | default                     | meaning                                   |
 |--------------|-----------------------------|-------------------------------------------|
+| `-host`      | `localhost`                 | bind interface (`0.0.0.0` to expose)      |
 | `-port`      | `8443`                      | proxy listen port                         |
 | `-ui-port`   | `8088`                      | web UI / API listen port                  |
 | `-db`        | `cc-gateway.db`             | SQLite database path                      |

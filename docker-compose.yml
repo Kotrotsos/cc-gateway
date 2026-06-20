@@ -1,0 +1,18 @@
+# Super-easy deploy: `docker compose up -d --build`
+# Then point Claude Code at the proxy and open the UI:
+#   ANTHROPIC_BASE_URL=http://localhost:8443 claude
+#   open http://localhost:8088
+services:
+  cc-gateway:
+    build: .
+    image: cc-gateway
+    container_name: cc-gateway
+    ports:
+      - "8443:8443" # proxy — set ANTHROPIC_BASE_URL to this
+      - "8088:8088" # web UI / API
+    volumes:
+      - ccdata:/data # the SQLite database persists here
+    restart: unless-stopped
+
+volumes:
+  ccdata:
