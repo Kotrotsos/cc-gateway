@@ -34,6 +34,24 @@ func Backfill(st *store.Store) (int, error) {
 		}
 		updated++
 	}
+
+	// Recompute every request's cost when the price table changed, so rows costed
+	// under stale pricing (e.g. the old Opus rates) are corrected in place.
+	if ver, _ := st.GetMeta("cost_version"); ver != CostVersion {
+		costRows, err := st.CostRows()
+		if err != nil {
+			return updated, err
+		}
+		for _, c := range costRows {
+			if err := st.UpdateCost(c.ID, estCost(c.Model, c.Usage)); err != nil {
+				return updated, err
+			}
+		}
+		if err := st.SetMeta("cost_version", CostVersion); err != nil {
+			return updated, err
+		}
+	}
+
 	if err := st.RecomputeSessionAggregates(); err != nil {
 		return updated, err
 	}

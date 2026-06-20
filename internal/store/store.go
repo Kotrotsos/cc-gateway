@@ -120,6 +120,11 @@ CREATE INDEX IF NOT EXISTS idx_blocks_tool ON content_blocks(type, tool_name);
 CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
   text, block_id UNINDEXED, request_id UNINDEXED, session_id UNINDEXED
 );
+
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT
+);
 `
 
 func (s *Store) migrate() error {

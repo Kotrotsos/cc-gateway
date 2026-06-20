@@ -1,8 +1,63 @@
 package store
 
+import (
+	"database/sql"
+
+	"cc-gateway/internal/parse"
+)
+
 // This file supports re-deriving token usage for exchanges that were captured
 // before the proxy decoded gzip-compressed responses. The wire bytes are still
 // stored, so usage can be recovered by re-parsing them.
+
+// GetMeta returns a stored meta value, or "" when the key is absent.
+func (s *Store) GetMeta(key string) (string, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return v, err
+}
+
+// SetMeta upserts a meta value.
+func (s *Store) SetMeta(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO meta(key, value) VALUES(?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+// CostRow is a request's model and token usage, used to recompute its cost.
+type CostRow struct {
+	ID    int64
+	Model string
+	Usage parse.Usage
+}
+
+// CostRows returns the model and usage of every request, for cost recomputation.
+func (s *Store) CostRows() ([]CostRow, error) {
+	rows, err := s.db.Query(`SELECT id, model, in_tokens, out_tokens, cache_read, cache_write FROM requests`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CostRow
+	for rows.Next() {
+		var c CostRow
+		if err := rows.Scan(&c.ID, &c.Model, &c.Usage.InputTokens, &c.Usage.OutputTokens,
+			&c.Usage.CacheReadInputTokens, &c.Usage.CacheCreationInputTokens); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// UpdateCost rewrites just the est_cost column for one request.
+func (s *Store) UpdateCost(id int64, cost float64) error {
+	_, err := s.db.Exec(`UPDATE requests SET est_cost = ? WHERE id = ?`, cost, id)
+	return err
+}
 
 // ZeroUsageRequests returns the ids of successful /v1/messages exchanges that
 // have a stored response body but no recorded token usage — the rows eligible
