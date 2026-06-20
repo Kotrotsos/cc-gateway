@@ -208,18 +208,11 @@ function RunGroup({
   const root = run[0];
   const children = run.slice(1);
   const hasChildren = children.length > 0;
-  const err = root.status >= 400 || !!root.error;
 
   return (
     <li className="relative pb-3 pl-7">
       {/* main timeline rail connecting run roots */}
       {!isLastRun && <span className="absolute left-[9px] top-5 h-full w-px bg-border" />}
-      <span
-        className={cn(
-          "absolute left-1 top-[7px] h-3.5 w-3.5 rounded-full border-2 bg-background",
-          err ? "border-destructive" : "border-primary",
-        )}
-      />
 
       <RequestNode
         req={root}
@@ -291,20 +284,28 @@ function RequestNode({
   const maxSpan = Math.max(1, ...spans.map((s) => s.duration_ms || 0));
 
   return (
-    <div ref={ref} className="relative">
-      {/* green node marker for indented continuations, sitting on the branch line */}
-      {indented && <span className="absolute -left-[19px] top-[11px] h-2 w-2 rounded-full bg-emerald-500/70" />}
-
-      <div
-        onClick={onSelect}
-        role="button"
-        tabIndex={0}
-        className={cn(
-          "flex w-full cursor-pointer items-center gap-2 rounded-lg border bg-card px-3 py-2 text-left transition-colors",
-          selected ? "border-primary/40 bg-accent ring-1 ring-primary/30" : "hover:bg-muted/60",
-          focus && !selected && "ring-1 ring-ring",
-        )}
-      >
+    <div ref={ref}>
+      {/* Marker centered on the card row: a hollow circle on the timeline rail for
+          run roots, a green dot on the branch line for indented continuations. */}
+      <div className="relative">
+        <span
+          className={cn(
+            "absolute top-1/2 z-10 -translate-y-1/2 rounded-full",
+            indented
+              ? "-left-[21px] h-2 w-2 bg-emerald-500/70"
+              : cn("-left-[26px] h-3.5 w-3.5 border-2 bg-background", err ? "border-destructive" : "border-primary"),
+          )}
+        />
+        <div
+          onClick={onSelect}
+          role="button"
+          tabIndex={0}
+          className={cn(
+            "flex w-full cursor-pointer items-center gap-2 rounded-lg border bg-card px-3 py-2 text-left transition-colors",
+            selected ? "border-primary/40 bg-accent ring-1 ring-primary/30" : "hover:bg-muted/60",
+            focus && !selected && "ring-1 ring-ring",
+          )}
+        >
         {collapsible && (
           <button
             onClick={(e) => {
@@ -337,6 +338,7 @@ function RequestNode({
         <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
           {fmtDuration(req.duration_ms)} · ↑{fmtTokens(req.in_tokens)} ↓{fmtTokens(req.out_tokens)}
         </span>
+        </div>
       </div>
 
       <NodeSpans spans={spans} max={maxSpan} onFilterTool={onFilterTool} />
